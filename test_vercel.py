@@ -32,6 +32,18 @@ class VercelDemoTest(unittest.TestCase):
                 with client.open(root + "/api/me") as response:
                     self.assertEqual(json.load(response)["user"]["handle"], "ada")
                 self.assertNotEqual(demo_state().db_path, old_path)
+                with client.open(Request(root + "/api/teams/15/join", data=b'{}', headers={"Content-Type": "application/json"})) as response:
+                    self.assertEqual(response.status, 201)
+                adapter._state = None
+                with client.open(root + "/api/teams/15/room") as response:
+                    self.assertEqual(response.status, 200)
+                with client.open(root + "/api/me") as response:
+                    self.assertIn(15, [t["id"] for t in json.load(response)["user"]["teams"]])
+                with client.open(Request(root + "/api/teams/15/leave", data=b'{}', headers={"Content-Type": "application/json"})) as response:
+                    self.assertEqual(response.status, 200)
+                adapter._state = None
+                with client.open(root + "/api/me") as response:
+                    self.assertNotIn(15, [t["id"] for t in json.load(response)["user"]["teams"]])
                 with client.open(root + "/api/notifications") as response:
                     self.assertEqual(response.status, 200)
                 with client.open(Request(root + "/api/logout", data=b'{}', headers={"Content-Type": "application/json"})) as response:

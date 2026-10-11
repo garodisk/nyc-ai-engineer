@@ -19,8 +19,8 @@ _lock = threading.Lock()
 _state = None
 
 
-def sign_demo_session(handle, secret, expires=None):
-    claims = json.dumps({"handle": handle, "expires": expires if expires is not None else int(time.time()) + 30 * server.DAY},
+def sign_demo_session(handle, secret, expires=None, teams=None):
+    claims = json.dumps({"handle": handle, "teams": teams or [], "expires": expires if expires is not None else int(time.time()) + 30 * server.DAY},
                         separators=(",", ":")).encode()
     encoded = base64.urlsafe_b64encode(claims).decode().rstrip("=")
     signature = hmac.new(secret.encode(), ("aoh-demo-v1." + encoded).encode(), hashlib.sha256).hexdigest()
@@ -29,7 +29,7 @@ def sign_demo_session(handle, secret, expires=None):
 
 def verify_demo_session(token, secret):
     try:
-        if len(token) > 600:
+        if len(token) > 2000:
             return None
         version, encoded, signature = token.split(".")
         expected = hmac.new(secret.encode(), ("aoh-demo-v1." + encoded).encode(), hashlib.sha256).hexdigest()
@@ -54,11 +54,15 @@ def demo_state():
             seed.seed(path)
             seed.seed_builders(path)
             seed.seed_hackathons(path)
+            db = server.connect(path)
+            seeded_team_ids = {r["id"] for r in db.execute("SELECT id FROM teams")}
+            db.close()
             _state = SimpleNamespace(
                 db_path=path, quiet=True, auto_approve=2, react_times={},
                 agent_mode="simulated", agent_delay=0, demo_ritual=None,
                 synchronous_jobs=True,
                 room_instance=os.path.basename(os.path.dirname(path)),
+                seeded_team_ids=seeded_team_ids,
             )
         return _state
 
@@ -75,17 +79,41 @@ class handler(server.Handler):
         token = jar[server.COOKIE].value if server.COOKIE in jar else ""
         if token.startswith("demo1."):
             handle = verify_demo_session(token, secret) if secret else None
-            return db.execute("SELECT * FROM users WHERE handle=?", (handle,)).fetchone() if handle else None
+            user = db.execute("SELECT * FROM users WHERE handle=?", (handle,)).fetchone() if handle else None
+            if user:
+                encoded = token.split(".")[1]
+                claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+                teams = claims.get("teams", [])
+                if isinstance(teams, list) and len(teams) <= 100:
+                    for tid in teams:
+                        if type(tid) is not int or tid not in self.server.seeded_team_ids:
+                            continue
+                        if db.execute("SELECT 1 FROM members WHERE team_id=? AND user_id=?", (tid, user["id"])).fetchone():
+                            continue
+                        try:
+                            server.check_can_join(db, server.get_team(db, tid), user["id"])
+                            db.execute("INSERT INTO members(team_id,user_id,joined_at) VALUES(?,?,?)", (tid, user["id"], server.now()))
+                        except server.ApiError:
+                            pass
+                db.commit()
+            return user
         return super().current_user(db)
 
     def send_json(self, status, payload, cookie=None):
         secret = os.environ.get("AOH_DEMO_SESSION_SECRET", "")
-        if cookie and secret:
+        membership_change = self.command == "POST" and (self.path.startswith("/api/teams/") or self.path.startswith("/api/requests/")) and 200 <= status < 300
+        if secret and (cookie or membership_change):
             db = server.connect(self.server.db_path)
             try:
-                user = db.execute("SELECT u.handle FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?", (cookie,)).fetchone()
+                user = db.execute("SELECT u.id, u.handle FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=?", (cookie,)).fetchone() if cookie else None
+                if not user and membership_change:
+                    jar = SimpleCookie(self.headers.get("Cookie") or "")
+                    token = jar[server.COOKIE].value if server.COOKIE in jar else ""
+                    handle = verify_demo_session(token, secret)
+                    user = db.execute("SELECT id, handle FROM users WHERE handle=?", (handle,)).fetchone() if handle else None
                 if user:
-                    cookie = sign_demo_session(user["handle"], secret)
+                    teams = [r["team_id"] for r in db.execute("SELECT team_id FROM members WHERE user_id=?", (user["id"],)) if r["team_id"] in self.server.seeded_team_ids]
+                    cookie = sign_demo_session(user["handle"], secret, teams=teams)
             finally:
                 db.close()
         return super().send_json(status, payload, cookie)
