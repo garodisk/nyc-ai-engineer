@@ -67,3 +67,7 @@ class BuildmateTest(unittest.TestCase):
             with self.assertRaises(ai.BuildmateError):
                 ai.interpret("Find people", None, [], {})
             upstream.assert_not_called()
+
+    def test_unrestricted_ai_values_do_not_become_filters(self):
+        context = ai.clean_context(dict(ai.DEFAULTS, location="Worldwide", role="any", experience="any", mode="any"))
+        self.assertEqual((context["location"], context["role"], context["experience"], context["mode"]), ("", "", "", ""))

@@ -1,6 +1,7 @@
 """Server-only OpenRouter intent extraction. Never returns invented database records."""
 import json
 import os
+import re
 import threading
 import time
 from urllib.request import Request, urlopen
@@ -25,6 +26,14 @@ def clean_context(value):
     for name in ("location", "interest", "role", "experience", "mode", "goal"):
         if isinstance(value.get(name), str):
             result[name] = value[name].strip()[:1200 if name == "goal" else 100]
+            if name != "goal" and result[name].lower() in ("any", "all", "none", "unspecified", "not specified"):
+                result[name] = ""
+    if result["location"].lower() in ("worldwide", "global", "globally", "anywhere", "international"):
+        result["location"] = ""
+    if result["experience"] not in ("", "Senior", "Mid-level", "Early career"):
+        result["experience"] = ""
+    if result["mode"] not in ("", "Remote", "Hybrid", "Local", "Online", "In person"):
+        result["mode"] = ""
     result["kind"] = value.get("kind") if value.get("kind") in KINDS else "builders"
     for name, low, high in (("count", 1, 10), ("hours", 0, 168)):
         number = value.get(name, DEFAULTS[name])
@@ -53,6 +62,10 @@ def interpret(prompt, previous, history, vocabulary):
     props.update(kind={"type": "string", "enum": KINDS}, count={"type": "integer"},
                  hours={"type": "integer"}, skills={"type": "array", "items": {"type": "string"}},
                  anySkill={"type": "boolean"}, savedOnly={"type": "boolean"})
+    props["experience"] = {"type": "string", "enum": ["", "Senior", "Mid-level", "Early career"]}
+    props["mode"] = {"type": "string", "enum": ["", "Remote", "Hybrid", "Local", "Online", "In person"]}
+    for name in ("location", "interest", "role"):
+        props[name]["description"] = "Empty string when not explicitly required. Never use 'any', 'none', or 'Worldwide'."
     schema = {"type": "object", "properties": {"context": {"type": "object", "properties": props,
               "required": list(props), "additionalProperties": False}, "message": {"type": "string"}},
               "required": ["context", "message"], "additionalProperties": False}
@@ -63,6 +76,9 @@ NYC means New York. A project idea means builders; suggest complementary roles i
 but do not require every suggested skill on each person. Explicit 'React and Python' requires both;
 'React or Python' sets anySkill=true. Preserve unknown skills/locations so searches can return zero.
 Use canonical vocabulary when available. Don't infer unstated location, seniority, or availability.
+EVERY unspecified string filter MUST be empty string, never 'any' or 'none'. Worldwide MUST be
+an empty location. Role is ONLY a filter when the user explicitly asks for that specific role.
+React does not imply Frontend engineer, and Python does not imply AI / ML engineer.
 kind must be builders, teams, events, projects, challenges, or overview. Defaults: 3 results,
 no filters, false booleans, 0 hours. goal holds the user's project idea, otherwise empty.
 Never name or invent people, teams, events, counts, matches, availability, links or database facts:
@@ -90,6 +106,9 @@ Return only the required JSON object."""
             body = json.loads(response.read(100000))
         output = json.loads(body["choices"][0]["message"]["content"])
         context = clean_context(output["context"])
+        # A skill or project idea alone must not silently impose a specific job title.
+        if not re.search(r"designer|frontend|front.end|backend|back.end|full.stack|ml engineer|ai engineer|machine learning engineer", prompt, re.I):
+            context["role"] = clean_context(previous)["role"] if previous else ""
         message = output.get("message", "")
         if not isinstance(message, str):
             raise ValueError("Invalid message")
