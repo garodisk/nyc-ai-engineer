@@ -2187,6 +2187,7 @@ def stage(c, tid):
     sub = c.db.execute("SELECT * FROM submissions WHERE team_id=?", (r["id"],)).fetchone()
     people = stage_people(c.db, r["id"])
     out = {"team": team_out(c.db, r), "submission": dict(sub) if sub else None, "presenter": is_member(c.db, r["id"], uid),
+           "temporary_storage": bool(getattr(c.srv, "synchronous_jobs", False)),
            "live": bool(live), "demo": None, "viewers": sum(1 for p in people if p["role"] == "viewer"),
            "presenters": [{"user": user_out(c.db.execute("SELECT * FROM users WHERE id=?", (p["user_id"],)).fetchone()),
                            "screen": bool(p["screen"]), "cam": bool(p["cam"]), "mic": bool(p["mic"])}
@@ -2281,6 +2282,7 @@ def stage_heartbeat(c, tid):
                                      (r["id"], session, since))]
     visible = [p for p in people if presenter or p["role"] == "presenter"]
     return 200, {"live": bool(live), "viewers": viewers, "signals": signals,
+                 "instance": getattr(c.srv, "room_instance", "local"),
                  "participants": [{"session": p["session"], "user_id": p["user_id"], "role": p["role"],
                                    "screen": bool(p["screen"]), "cam": bool(p["cam"]), "mic": bool(p["mic"])} for p in visible]}
 

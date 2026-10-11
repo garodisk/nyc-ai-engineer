@@ -13,6 +13,7 @@ function leaveStage() {
   if (!stage) return;
   const s = stage;
   stage = null;
+  s.mediaGeneration++;
   clearTimeout(s.stateTimer);
   clearInterval(s.beatTimer);
   window.removeEventListener('pagehide', s.onHide);
@@ -57,11 +58,13 @@ function newStagePeer(s, sess) {
   return peer;
 }
 
-function attachStageLocal(s, peer) {
+async function attachStageLocal(s, peer) {
   if (!s.presenter) return;
-  peer.tx[TX.audio]?.sender.replaceTrack(s.local.mic || null);
-  peer.tx[TX.screen]?.sender.replaceTrack(s.local.screen || null);
-  peer.tx[TX.cam]?.sender.replaceTrack(s.local.cam || null);
+  await Promise.all([
+    peer.tx[TX.audio]?.sender.replaceTrack(s.local.mic || null),
+    peer.tx[TX.screen]?.sender.replaceTrack(s.local.screen || null),
+    peer.tx[TX.cam]?.sender.replaceTrack(s.local.cam || null),
+  ]);
 }
 
 function closeStagePeer(s, sess) {
@@ -77,7 +80,7 @@ async function callStagePeer(s, sess, role) {
   // To a viewer we only send; with a co-presenter we send and receive.
   const direction = role === 'viewer' ? 'sendonly' : 'sendrecv';
   peer.tx = ['audio', 'video', 'video'].map((kind) => peer.pc.addTransceiver(kind, { direction }));
-  attachStageLocal(s, peer);
+  await attachStageLocal(s, peer);
   await peer.pc.setLocalDescription(await peer.pc.createOffer());
   await waitForIce(peer.pc);
   if (stage !== s) return;
@@ -92,7 +95,7 @@ async function onStageSignal(s, sig) {
     await peer.pc.setRemoteDescription({ type: 'offer', sdp: sig.payload.sdp });
     peer.tx = peer.pc.getTransceivers();
     for (const t of peer.tx) t.direction = s.presenter ? 'sendrecv' : 'recvonly';
-    attachStageLocal(s, peer);
+    await attachStageLocal(s, peer);
     await peer.pc.setLocalDescription(await peer.pc.createAnswer());
     await waitForIce(peer.pc);
     if (stage !== s) return;
@@ -109,12 +112,25 @@ async function stageBeat(s) {
   try {
     const hb = await api(`/teams/${s.teamId}/stage/heartbeat`, {
       session: s.session, since: s.since, screen: !!s.local.screen, cam: !!s.local.cam, mic: !!(s.local.mic && s.local.mic.enabled),
-    });
+    }, { timeoutMs: 8000 });
     if (stage !== s) return;
+    s.connectionError = '';
+    if (s.instance && hb.instance && s.instance !== hb.instance) {
+      s.since = 0;
+      for (const sess of [...s.peers.keys()]) closeStagePeer(s, sess);
+      s.signalEpoch++;
+      s.signalChains.clear();
+      s.connectionError = 'The demo server changed instances. Reconnecting; local media stays on.';
+    }
+    s.instance = hb.instance || s.instance;
     s.full = !!hb.full;
     for (const sig of hb.signals) {
       s.since = Math.max(s.since, sig.id);
-      await onStageSignal(s, sig).catch((e) => console.warn('stage signal', e));
+      const epoch = s.signalEpoch;
+      const task = (s.signalChains.get(sig.from) || Promise.resolve()).then(() => {
+        if (stage === s && epoch === s.signalEpoch) return onStageSignal(s, sig);
+      }).catch((e) => console.warn('stage signal', e));
+      s.signalChains.set(sig.from, task);
     }
     s.participants = hb.participants;
     const present = new Set(hb.participants.map((p) => p.session));
@@ -132,8 +148,11 @@ async function stageBeat(s) {
       }
     }
     paintStageMedia(s);
+    paintStageControls(s);
   } catch (e) {
-    if (e.status === 403 || e.status === 401) { toast(e.message, true); leaveStage(); }
+    if (stage !== s) return;
+    s.connectionError = e.status === 403 || e.status === 401 ? e.message : 'Reconnecting to the stage… Your local preview is still available.';
+    paintStageControls(s);
   } finally {
     s.beating = false;
   }
@@ -150,42 +169,72 @@ function joinStage(s) {
 // ---------- presenter media ----------
 
 async function toggleScreen(s) {
+  if (stage !== s || s.screenBusy) return;
   if (s.local.screen) {
     s.local.screen.stop();
     s.local.screen = null;
   } else {
     if (!navigator.mediaDevices?.getDisplayMedia) { toast('Screen sharing needs a desktop browser over HTTPS (or localhost)', true); return; }
+    s.screenBusy = true;
+    const generation = s.mediaGeneration;
+    paintStageControls(s);
     try {
       const st = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 15 }, audio: false });
+      if (stage !== s || generation !== s.mediaGeneration) { st.getTracks().forEach((t) => t.stop()); return; }
       s.local.screen = st.getVideoTracks()[0];
+      if (!s.local.screen) throw new Error('The selected screen did not provide a video track. Try sharing again.');
       s.local.screen.contentHint = 'detail'; // keep text sharp rather than smooth
       // The browser's own "Stop sharing" bar ends the track; follow it.
       s.local.screen.onended = () => { if (stage === s && s.local.screen) { s.local.screen = null; refreshStageMedia(s); } };
     } catch (e) {
-      if (e.name !== 'NotAllowedError') toast(mediaError(e), true);
+      s.mediaError = e.name === 'NotAllowedError' ? 'Screen sharing was cancelled or denied. Click Share screen to try again.' : mediaError(e);
+      toast(s.mediaError, true);
       return;
-    }
+    } finally { s.screenBusy = false; if (stage === s) paintStageControls(s); }
   }
   refreshStageMedia(s);
 }
 
 async function toggleStageCam(s) {
+  if (stage !== s || s.camBusy) return;
   if (s.local.cam) {
     s.local.cam.stop();
     s.local.cam = null;
   } else {
+    if (!navigator.mediaDevices?.getUserMedia) { s.mediaError = 'Camera needs a supported browser over HTTPS.'; paintStageControls(s); return; }
+    s.camBusy = true;
+    const generation = s.mediaGeneration;
+    paintStageControls(s);
     try {
-      s.local.cam = (await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 } })).getVideoTracks()[0];
-    } catch (e) { toast(mediaError(e), true); return; }
+      const st = await navigator.mediaDevices.getUserMedia({ video: { width: 320, height: 240 }, audio: false });
+      if (stage !== s || generation !== s.mediaGeneration) { st.getTracks().forEach((t) => t.stop()); return; }
+      s.local.cam = st.getVideoTracks()[0];
+      if (!s.local.cam) throw new Error('No camera video track was available.');
+      const cam = s.local.cam;
+      cam.onended = () => { if (stage === s && s.local.cam === cam) { s.local.cam = null; refreshStageMedia(s); } };
+    } catch (e) { s.mediaError = mediaError(e); toast(s.mediaError, true); return; }
+    finally { s.camBusy = false; if (stage === s) paintStageControls(s); }
   }
   refreshStageMedia(s);
 }
 
 async function toggleStageMic(s) {
+  if (stage !== s || s.micBusy) return;
+  if (s.local.mic?.readyState === 'ended') s.local.mic = null;
   if (!s.local.mic) {
+    if (!navigator.mediaDevices?.getUserMedia) { s.mediaError = 'Microphone needs a supported browser over HTTPS.'; paintStageControls(s); return; }
+    s.micBusy = true;
+    const generation = s.mediaGeneration;
+    paintStageControls(s);
     try {
-      s.local.mic = (await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } })).getAudioTracks()[0];
-    } catch (e) { toast(mediaError(e), true); return; }
+      const st = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: false });
+      if (stage !== s || generation !== s.mediaGeneration) { st.getTracks().forEach((t) => t.stop()); return; }
+      s.local.mic = st.getAudioTracks()[0];
+      if (!s.local.mic) throw new Error('No microphone audio track was available.');
+      const mic = s.local.mic;
+      mic.onended = () => { if (stage === s && s.local.mic === mic) { s.local.mic = null; refreshStageMedia(s); } };
+    } catch (e) { s.mediaError = mediaError(e); toast(s.mediaError, true); return; }
+    finally { s.micBusy = false; if (stage === s) paintStageControls(s); }
   } else {
     s.local.mic.enabled = !s.local.mic.enabled;
   }
@@ -193,7 +242,9 @@ async function toggleStageMic(s) {
 }
 
 function refreshStageMedia(s) {
-  for (const peer of s.peers.values()) attachStageLocal(s, peer);
+  if (stage !== s) return;
+  s.mediaError = '';
+  for (const [sess, peer] of s.peers) attachStageLocal(s, peer).catch((e) => { console.warn('stage media', e); closeStagePeer(s, sess); });
   paintStageControls(s);
   paintStageMedia(s);
   stageBeat(s);
@@ -234,7 +285,10 @@ function paintStageMedia(s) {
   main.querySelector('.stage-who').textContent = screen ? `🖥 ${who === 'You' ? 'You are' : `${who} is`} sharing` : '';
 
   // Camera strip: one tile per presenter (only once you've joined; before that, avatars of the team).
-  const list = s.joined ? presenters : [];
+  const list = s.joined ? [...presenters] : [];
+  if (s.joined && s.presenter && !list.some((p) => p.session === s.session)) {
+    list.push({ session: s.session, user_id: me.id, role: 'presenter', cam: !!s.local.cam, mic: !!s.local.mic?.enabled });
+  }
   const wanted = new Set(list.map((p) => p.session));
   cams.querySelectorAll('[data-session]').forEach((el) => { if (!wanted.has(el.dataset.session)) el.remove(); });
   for (const p of list) {
@@ -266,7 +320,7 @@ function paintStageControls(s) {
   if (!el) return;
   const st = s.state;
   if (s.presenter) {
-    if (st.team.status !== 'shipped') {
+    if (st.team.status !== 'shipped' && !s.joined) {
       el.innerHTML = `<p class="small muted" style="margin:0">Finish the project in your <a href="#/t/${st.team.id}/room">Team Room</a> to open the stage.</p>`;
       return;
     }
@@ -277,12 +331,13 @@ function paintStageControls(s) {
     }
     const micOn = !!(s.local.mic && s.local.mic.enabled);
     el.innerHTML = `<div class="row">
-        <button class="btn ${s.local.screen ? 'on-air' : ''}" data-stage="screen">🖥 ${s.local.screen ? 'Stop sharing' : 'Share screen'}</button>
-        <button class="btn ghost ${s.local.cam ? 'on' : ''}" data-stage="cam">📷 Camera ${s.local.cam ? 'on' : 'off'}</button>
-        <button class="btn ghost ${micOn ? 'on' : ''}" data-stage="mic">${micOn ? '🎙 Mic on' : '🔇 Mic off'}</button>
+        <button class="btn ${s.local.screen ? 'on-air' : ''}" data-stage="screen" ${s.screenBusy ? 'disabled' : ''}>🖥 ${s.screenBusy ? 'Choosing screen…' : s.local.screen ? 'Stop sharing' : 'Share screen'}</button>
+        <button class="btn ghost ${s.local.cam ? 'on' : ''}" data-stage="cam" ${s.camBusy ? 'disabled' : ''}>📷 ${s.camBusy ? 'Starting camera…' : `Camera ${s.local.cam ? 'on' : 'off'}`}</button>
+        <button class="btn ghost ${micOn ? 'on' : ''}" data-stage="mic" ${s.micBusy ? 'disabled' : ''}>${s.micBusy ? 'Starting microphone…' : micOn ? '🎙 Mic on' : '🔇 Mic off'}</button>
         <span style="flex:1"></span>
         ${st.live ? '<button class="btn danger" data-stage="end">■ End demo</button>'
-          : '<button class="btn live-btn" data-stage="live">🔴 Go live</button>'}</div>
+          : `<button class="btn live-btn" data-stage="live" ${s.liveBusy ? 'disabled' : ''}>${s.liveBusy ? 'Starting live demo…' : '🔴 Go live'}</button>`}</div>
+      ${s.mediaError || s.connectionError ? `<p role="status" class="small" style="margin:8px 0">${esc(s.mediaError || s.connectionError)}</p>` : ''}
       <p class="small muted" style="margin:6px 0 0">${st.live ? `You're live — ${st.viewers} watching. Your mic stays on while you present; mute it any time.`
         : 'Set things up, then Go live — everyone gets a notification and can watch here.'}</p>`;
   } else if (s.full) {
@@ -332,6 +387,7 @@ async function viewStage(id) {
   const st0 = await api(`/teams/${id}/stage`);
   const html = `<div class="stage-page">
     <div id="stage-head">${stageHeader(st0)}</div>
+    ${st0.temporary_storage ? '<p class="notice">Preview your screen and camera here. Audience streaming is experimental on this demo deployment and can disconnect. For a reliable live presentation, use your team’s external meeting link.</p>' : ''}
     <div class="stage-grid section" style="margin-top:18px">
       <div class="stack">
         <div class="stage-main" id="stage-main"><video autoplay playsinline muted></video><span class="stage-who"></span>
@@ -349,7 +405,7 @@ async function viewStage(id) {
     const s = stage = {
       teamId: st0.team.id, session: newSession(), presenter: st0.presenter, state: st0, joined: false,
       peers: new Map(), participants: [], since: 0, local: { screen: null, cam: null, mic: null },
-      lastReactions: { ...st0.reactions },
+      lastReactions: { ...st0.reactions }, mediaGeneration: 0, signalEpoch: 0, signalChains: new Map(),
     };
     paintStageControls(s);
     paintStageMedia(s);
@@ -398,11 +454,15 @@ async function viewStage(id) {
         else if (act === 'cam') await toggleStageCam(s);
         else if (act === 'mic') await toggleStageMic(s);
         else if (act === 'live') {
+          if (s.liveBusy) return;
           if (!s.local.screen && !s.local.cam && !confirm('You aren’t sharing your screen or camera yet. Go live anyway?')) return;
-          await api(`/teams/${s.teamId}/stage/start`, {});
-          toast('You’re live 🎬 — everyone’s been notified');
-          await refreshState();
-          stageBeat(s);
+          s.liveBusy = true; paintStageControls(s);
+          try {
+            await api(`/teams/${s.teamId}/stage/start`, {});
+            toast('You’re live 🎬 — everyone’s been notified');
+            await refreshState();
+            stageBeat(s);
+          } finally { s.liveBusy = false; if (stage === s) paintStageControls(s); }
         } else if (act === 'end') {
           if (!confirm('End the demo for everyone?')) return;
           const r2 = await api(`/teams/${s.teamId}/stage/end`, {});
@@ -412,7 +472,14 @@ async function viewStage(id) {
           await api(`/teams/${s.teamId}/stage/questions/${b.dataset.id}/answered`, {});
           await refreshState();
         }
-      } catch (err) { toast(err.message, true); }
+      } catch (err) {
+        s.mediaError = err.message;
+        if (s.state.temporary_storage && b.dataset.stage === 'live' && err.status === 400) {
+          s.mediaError += ' The temporary Vercel instance may have lost your submitted project. Shared storage is needed to keep the stage ready across instances.';
+        }
+        paintStageControls(s);
+        toast(s.mediaError, true);
+      }
     });
     document.getElementById('stage-side').addEventListener('submit', async (e) => {
       if (e.target.id !== 'ask') return;
