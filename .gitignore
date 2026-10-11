@@ -1,25 +1,15 @@
-# Dependencies and generated output
-node_modules/
-.next/
-.next-dev/
-out/
-dist/
-build/
-coverage/
-*.tsbuildinfo
-*.log
+data/
+__pycache__/
+*.pyc
+.DS_Store
 
-# Secrets and local environment files
+# Local credentials and deployment state
 .env
 .env.*
 !.env.example
+.vercel/
 *.pem
 *.key
-credentials.json
-secrets.json
-
-# Local editor / OS files
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
+*.log
+.venv/
+venv/
