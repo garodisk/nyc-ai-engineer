@@ -4,6 +4,14 @@
 
 ## Run it
 
+### Vercel demo hosting
+
+`vercel.json` serves the frontend and routes the API to `api/index.py`. The adapter seeds SQLite in the function's temporary directory. Data and sessions can reset on cold starts, new deployments, or another instance; different visitors may reach different instances. This deployment is for exploring the demo, not reliable shared collaboration or storing real event data.
+
+The Vercel demo always uses the simulated Build lab agent and needs no API keys. Join auto-approvals and simulated agent tasks finish inside their request so serverless shutdown cannot interrupt background work. The regular local server retains its original background behavior. Files containing credentials, `.env`, databases, and `.vercel` state are excluded from Git.
+
+Deploy from the repository root with `vercel --prod`. For persistent teams, sessions, meeting transcripts, or live signaling across users, move SQLite to shared storage or deploy the regular server on a persistent host.
+
 ```bash
 python3 server.py            # http://127.0.0.1:8000 (demo data is loaded on first run)
 python3 -m unittest -v       # API tests

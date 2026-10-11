@@ -905,7 +905,10 @@ def request_join(c, tid):
                        (r["id"], u["id"], "join", text(c.body, "message", max_len=400), now())).lastrowid
     delay = c.srv.auto_approve
     if delay:
-        c.after_commit.append(lambda: threading.Timer(delay, auto_approve, (c.srv.db_path, rid)).start())
+        if getattr(c.srv, "synchronous_jobs", False):
+            c.after_commit.append(lambda: auto_approve(c.srv.db_path, rid))
+        else:
+            c.after_commit.append(lambda: threading.Timer(delay, auto_approve, (c.srv.db_path, rid)).start())
         return 201, {"request_id": rid, "auto_approve_in": delay}
     notify(c.db, [r["owner_id"]], f"@{u['handle']} asked to join {r['name']}", f"#/t/{r['id']}")
     return 201, {"request_id": rid}
@@ -2532,7 +2535,10 @@ def agent_start(c, tid):
         "SELECT prompt, summary, status FROM agent_runs WHERE team_id=? AND id<? AND status IN ('applied','discarded')"
         " ORDER BY id DESC LIMIT 4", (r["id"], rid))][::-1]
     job = (c.srv.db_path, rid, mode, prompt, json.loads(head["files"]), context, history, c.srv.agent_delay)
-    c.after_commit.append(lambda: threading.Thread(target=run_agent, args=job, daemon=True).start())
+    if getattr(c.srv, "synchronous_jobs", False):
+        c.after_commit.append(lambda: run_agent(*job))
+    else:
+        c.after_commit.append(lambda: threading.Thread(target=run_agent, args=job, daemon=True).start())
     log_team(c.db, r["id"], u["id"], f"asked the build agent: {prompt[:80]}")
     return 201, {"run": run_out(c.db, c.db.execute("SELECT * FROM agent_runs WHERE id=?", (rid,)).fetchone())}
 
