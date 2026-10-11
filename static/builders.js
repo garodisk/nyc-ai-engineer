@@ -202,7 +202,7 @@ function filteredBuilders() {
 
 function builderSelect(key, label, options) {
   return `<label class="filter"><span>${label}</span><select data-f="${key}"><option value="">All ${label.toLowerCase()}</option>
-    ${options.map((o) => `<option ${builderFilters[key] === o ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></label>`;
+    ${options.map((o) => `<option ${String(builderFilters[key] || '').toLowerCase() === o.toLowerCase() ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></label>`;
 }
 
 function builderFilterPanel() {
