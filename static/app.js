@@ -126,7 +126,12 @@ function modal(title, bodyHtml, okLabel, onOk) {
   d.querySelector('[data-close]').onclick = () => d.close();
   form.onsubmit = async (e) => {
     e.preventDefault();
-    try { await onOk(formValues(form)); d.close(); } catch (err) { toast(err.message, true); }
+    const submit = form.querySelector('[type=submit]');
+    if (submit.disabled) return;
+    submit.disabled = true;
+    try { await onOk(formValues(form), () => d.close()); d.close(); }
+    catch (err) { toast(err.message, true); }
+    finally { submit.disabled = false; }
   };
   d.addEventListener('close', () => d.remove());
   d.showModal();
@@ -524,11 +529,12 @@ async function viewChallenge(id, params) {
       if (t && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); openBuilderProfile(+t.dataset.id); }
     });
     bindFloor(c.id);
-    onSubmit('#new-team', async (v) => {
+    onSubmit('#new-team', async (v, form) => {
       const r = await api('/teams', { ...v, challenge_id: c.id, looking_for: splitList(v.looking_for), max_size: +v.max_size });
-      await refreshMe();
+      form.hidden = true;
       toast('Team created');
       location.hash = `#/t/${r.team.id}`;
+      await refreshMe();
     });
   }];
 }
@@ -651,8 +657,9 @@ async function viewTeam(id) {
       toast('Demo scheduled — everyone has been notified'); render();
     });
     onSubmit('#submit', async (v) => { await api('/submissions', { ...v, team_id: t.id }); toast('Project submitted 🚀'); render(); });
-    onSubmit('#edit-team', async (v) => {
+    onSubmit('#edit-team', async (v, form) => {
       await api(`/teams/${t.id}`, { ...v, looking_for: splitList(v.looking_for), max_size: +v.max_size });
+      form.closest('details').open = false;
       toast('Saved'); render();
     });
   }];

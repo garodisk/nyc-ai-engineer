@@ -312,12 +312,13 @@ async function viewRitual(occId) {
           modal('Turn your idea into a team', `<p class="small muted" style="margin:0">“${esc(b.dataset.text)}”</p>
             <label>Team name<input name="name" required maxlength="50"></label>
             <label>Challenge<select name="challenge_id">${open.map((c) => `<option value="${c.id}">${esc(c.title)} — ${esc(c.sponsor.name)}</option>`).join('')}</select></label>
-            <p class="small muted" style="margin:0">Everyone who tapped “I'm in” gets an invite.</p>`, 'Create team', async (v) => {
+            <p class="small muted" style="margin:0">Everyone who tapped “I'm in” gets an invite.</p>`, 'Create team', async (v, close) => {
             const res = await api(`/ideas/${b.dataset.id}/form-team`, { name: v.name, challenge_id: +v.challenge_id });
-            await refreshMe();
+            close();
             const busy = res.already_on_a_team ? ` (${res.already_on_a_team} already on a team for that challenge)` : '';
             toast(`Team created${res.invited ? ` — invited ${res.invited}` : ''}${busy} 🎉`);
             location.hash = `#/t/${res.team_id}/room`;
+            await refreshMe();
           });
           return;
         }
