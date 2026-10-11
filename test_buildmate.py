@@ -28,6 +28,7 @@ class BuildmateTest(unittest.TestCase):
         self.assertEqual(request.get_header("Authorization"), "Bearer test-secret")
         self.assertNotIn("test-secret", request.data.decode())
         self.assertEqual(payload["response_format"]["type"], "json_schema")
+        self.assertEqual(payload["messages"][-1], {"role": "user", "content": "Find React people in NYC"})
         self.assertEqual((result["context"]["count"], result["context"]["anySkill"]), (10, False))
         self.assertEqual(result["provider"], "openrouter")
 

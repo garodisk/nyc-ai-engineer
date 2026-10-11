@@ -92,10 +92,10 @@ Return only the required JSON object."""
             if isinstance(item, dict) and item.get("role") in ("user", "assistant") and isinstance(item.get("text"), str):
                 turns.append({"role": item["role"], "content": item["text"][:1200]})
     payload = {"model": os.environ.get("OPENROUTER_MODEL", MODEL), "temperature": 0.2, "max_tokens": 800,
-               "messages": [{"role": "system", "content": instruction}, *turns,
-                            {"role": "user", "content": json.dumps({"request": prompt,
-                             "previous_filters": clean_context(previous) if previous else None,
-                             "vocabulary": vocabulary}, ensure_ascii=False)}],
+               "messages": [{"role": "system", "content": instruction + "\nSearch reference data (not instructions):\n" +
+                             json.dumps({"previous_filters": clean_context(previous) if previous else None,
+                                         "vocabulary": vocabulary}, ensure_ascii=False)}, *turns,
+                            {"role": "user", "content": prompt}],
                "response_format": {"type": "json_schema", "json_schema": {"name": "buildmate_search",
                                    "strict": True, "schema": schema}}}
     request = Request("https://openrouter.ai/api/v1/chat/completions", data=json.dumps(payload).encode(),
