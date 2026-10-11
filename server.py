@@ -632,8 +632,8 @@ def me(c):
                                  (u["id"], now() - HERE_WINDOW)).fetchone() is not None
     u["unread"] = c.db.execute("SELECT COUNT(*) FROM notifications WHERE user_id=? AND read=0", (u["id"],)).fetchone()[0]
     # Teams in challenges that haven't ended, newest first: powers the "My team" nav link.
-    u["teams"] = [{"id": r["id"], "name": r["name"], "challenge_title": r["challenge_title"]} for r in c.db.execute(
-        "SELECT tm.id, tm.name, ch.title AS challenge_title FROM members m JOIN teams tm ON tm.id=m.team_id"
+    u["teams"] = [{"id": r["id"], "name": r["name"], "challenge_id": r["challenge_id"], "challenge_title": r["challenge_title"]} for r in c.db.execute(
+        "SELECT tm.id, tm.name, tm.challenge_id, ch.title AS challenge_title FROM members m JOIN teams tm ON tm.id=m.team_id"
         " JOIN challenges ch ON ch.id=tm.challenge_id WHERE m.user_id=? AND ch.ends_at>? ORDER BY m.joined_at DESC",
         (u["id"], now()))]
     if u["sponsor_id"]:
@@ -801,6 +801,7 @@ def list_teams(c):
     pending = pending_team_ids(c.db, c.user["id"] if c.user else None)
     for x in teams:
         x["requested"] = x["id"] in pending
+        x["my_team_in_challenge"] = team_for_user_in_challenge(c.db, c.user["id"], x["challenge_id"]) if c.user else None
     return 200, {"teams": teams}
 
 
@@ -916,15 +917,19 @@ def auto_approve(db_path, rid):
 def request_join(c, tid):
     u = c.me()
     r = get_team(c.db, int(tid))
+    if c.db.execute("SELECT 1 FROM members WHERE team_id=? AND user_id=?", (r["id"], u["id"])).fetchone():
+        return 200, {"joined": True, "team_id": r["id"]}
     check_can_join(c.db, r, u["id"])
-    if c.db.execute("SELECT 1 FROM requests WHERE team_id=? AND user_id=? AND status='pending'", (r["id"], u["id"])).fetchone():
-        raise ApiError(409, "You already have a pending request or invite for this team")
+    pending = c.db.execute("SELECT id, kind FROM requests WHERE team_id=? AND user_id=? AND status='pending'", (r["id"], u["id"])).fetchone()
+    if pending:
+        return 200, {"request_id": pending["id"], "invited": pending["kind"] == "invite"}
     rid = c.db.execute("INSERT INTO requests(team_id,user_id,kind,message,created_at) VALUES(?,?,?,?,?)",
                        (r["id"], u["id"], "join", text(c.body, "message", max_len=400), now())).lastrowid
     delay = c.srv.auto_approve
     if delay:
         if getattr(c.srv, "synchronous_jobs", False):
             c.after_commit.append(lambda: auto_approve(c.srv.db_path, rid))
+            return 201, {"request_id": rid, "check_membership": True}
         else:
             c.after_commit.append(lambda: threading.Timer(delay, auto_approve, (c.srv.db_path, rid)).start())
         return 201, {"request_id": rid, "auto_approve_in": delay}

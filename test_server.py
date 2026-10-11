@@ -110,13 +110,14 @@ class ApiTest(unittest.TestCase):
         self.assertTrue(any("ml" in r for r in mine["reasons"]))
 
         rid = joiner.ok(f"/teams/{team['id']}/join", {"message": "hi"})["request_id"]
-        self.assertEqual(joiner.call(f"/teams/{team['id']}/join", {})[0], 409)
+        self.assertEqual(joiner.ok(f"/teams/{team['id']}/join", {})["request_id"], rid)
         self.assertEqual(joiner.call(f"/requests/{rid}", {"action": "accept"})[0], 403)
         self.assertEqual(owner.ok("/me")["user"]["inbox"], 1)
         owner.ok(f"/requests/{rid}", {"action": "accept"})
         detail = owner.ok(f"/teams/{team['id']}")["team"]
         self.assertEqual(len(detail["members"]), 2)
         self.assertFalse(detail["open"])
+        self.assertTrue(joiner.ok(f"/teams/{team['id']}/join", {})["joined"])
 
         third = self.signup("third1")
         self.assertEqual(third.call(f"/teams/{team['id']}/join", {})[0], 409)  # full
@@ -144,6 +145,9 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(guest.call(f"/teams/{team['id']}/invite", {"user_id": gid})[0], 403)
         rid = owner.ok(f"/teams/{team['id']}/invite", {"user_id": gid})["request_id"]
         self.assertEqual(len(guest.ok("/inbox")["invites"]), 1)
+        existing = guest.ok(f"/teams/{team['id']}/join", {})
+        self.assertTrue(existing["invited"])
+        self.assertEqual(existing["request_id"], rid)
         guest.ok(f"/requests/{rid}", {"action": "accept"})
         self.assertIsNotNone(guest.ok(f"/challenges/{ch['id']}")["my_team_id"])
 

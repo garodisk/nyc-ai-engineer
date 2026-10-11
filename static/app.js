@@ -180,6 +180,9 @@ function joinAction(t, ctx = {}) {
   if (me.role !== 'hacker') return '';
   if (t.members.some((m) => m.id === me.id)) return `<a class="btn sm ghost" href="#/t/${t.id}">Your team →</a>`;
   if (ctx.myTeamId) return '';
+  if (t.my_team_in_challenge) return `<a class="btn sm ghost" href="#/t/${t.my_team_in_challenge}/room">Already on a team →</a>`;
+  const existing = (me.teams || []).find((x) => x.challenge_id === t.challenge_id);
+  if (existing) return `<a class="btn sm ghost" href="#/t/${existing.id}/room">Already on a team →</a>`;
   if (t.requested || (ctx.pending || []).includes(t.id)) return `<button class="btn sm ghost" disabled>Requested</button>`;
   if (!t.open) return `<span class="small muted">Full</span>`;
   return `<button class="btn sm" data-act="join" data-id="${t.id}" data-name="${esc(t.name)}">Request to join</button>`;
@@ -1157,11 +1160,15 @@ const actions = {
   },
   join(el) {
     modal(`Join ${el.dataset.name}`, `<label>Say hi — what would you work on?<textarea name="message" maxlength="400" placeholder="I can take the frontend and the demo video."></textarea></label>`,
-      'Send request', async (v) => {
+      'Send request', async (v, close) => {
         const tid = el.dataset.id;
         const r = await api(`/teams/${tid}/join`, v);
+        close();
+        if (r.invited) { toast('You already have an invitation — accept it in Inbox'); location.hash = '#/inbox'; return; }
+        if (r.joined) { await refreshMe(); location.hash = `#/t/${tid}/room`; return; }
+        if (r.check_membership) { awaitApproval(el, tid, 0).catch(() => { toast('Request saved. Check Inbox for its status.'); render(); }); return; }
         if (!r.auto_approve_in) { toast('Request sent'); render(); return; }
-        awaitApproval(el, tid, r.auto_approve_in); // not awaited, so the dialog closes now
+        awaitApproval(el, tid, r.auto_approve_in).catch(() => { toast('Request saved. Check Inbox for its status.'); render(); });
       });
   },
 
