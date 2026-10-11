@@ -24,6 +24,7 @@ function leaveRoom() {
   if (!room) return;
   const r = room;
   room = null;
+  stopCall(r);
   clearInterval(r.refreshTimer);
   r.stopLab?.();
   clearInterval(r.beatTimer);
@@ -35,7 +36,16 @@ function leaveRoom() {
   window.removeEventListener('pointerup', r.onUp);
   window.removeEventListener('pointercancel', r.onUp);
   window.removeEventListener('blur', r.onUp);
-  if (r.joined) {
+}
+
+function stopCall(r) {
+  const wasJoined = r.joined;
+  r.joined = false;
+  r.beating = false;
+  r.mediaGeneration = (r.mediaGeneration || 0) + 1;
+  clearInterval(r.beatTimer);
+  clearInterval(r.meterTimer);
+  if (wasJoined) {
     for (const sess of r.peers.keys()) signalPeer(r, sess, 'bye', {}).catch(() => {});
     fetch(`/api/teams/${r.teamId}/room/leave`, {
       method: 'POST', keepalive: true, credentials: 'same-origin',
@@ -44,10 +54,21 @@ function leaveRoom() {
   }
   for (const sess of [...r.peers.keys()]) closePeer(r, sess);
   r.pressed = false;
+  r.local.talking = false;
   stopCaptions(r);
+  r.rec = null;
+  r.caption = '';
   r.local.cam?.stop();
   r.local.mic?.stop();
-  r.audioCtx?.close();
+  r.local.cam = r.local.mic = null;
+  r.cameraBusy = r.micBusy = false;
+  r.audioCtx?.close().catch(() => {});
+  r.audioCtx = null;
+  r.participants = [];
+  r.signalQueues = new Map();
+  r.connectionStatus = '';
+  paintTiles(r);
+  paintControls(r);
 }
 
 // ---------- WebRTC plumbing ----------
@@ -59,9 +80,10 @@ function signalPeer(r, to, kind, payload) {
 function waitForIce(pc) {
   return new Promise((resolve) => {
     if (pc.iceGatheringState === 'complete') return resolve();
-    const done = () => { if (pc.iceGatheringState === 'complete') resolve(); };
+    const finish = () => { clearTimeout(timer); pc.removeEventListener('icegatheringstatechange', done); resolve(); };
+    const done = () => { if (pc.iceGatheringState === 'complete') finish(); };
     pc.addEventListener('icegatheringstatechange', done);
-    setTimeout(resolve, 2500); // good enough: host + srflx candidates arrive fast
+    const timer = setTimeout(finish, 3500);
   });
 }
 
@@ -69,12 +91,14 @@ function makePeer(r, sess) {
   const pc = new RTCPeerConnection(RTC_CONFIG);
   const peer = { pc, stream: new MediaStream(), created: Date.now(), audioTx: null, videoTx: null, level: 0 };
   pc.ontrack = (e) => {
+    if (room !== r || !r.joined || r.peers.get(sess) !== peer) return;
     peer.stream.addTrack(e.track);
     if (e.track.kind === 'audio') watchLevel(r, peer, e.track);
     const v = tileFor(r, sess)?.querySelector('video');
     if (v && v.srcObject !== peer.stream) { v.srcObject = peer.stream; v.play().catch(() => {}); }
   };
   pc.onconnectionstatechange = () => {
+    if (r.peers.get(sess) !== peer) return;
     if (pc.connectionState === 'failed') closePeer(r, sess); // the offerer side reconnects on the next heartbeat
     paintTiles(r);
   };
@@ -82,16 +106,22 @@ function makePeer(r, sess) {
   return peer;
 }
 
-function attachLocal(r, peer) {
-  peer.audioTx?.sender.replaceTrack(r.local.mic || null);
-  peer.videoTx?.sender.replaceTrack(r.local.cam || null);
+async function attachLocal(r, peer) {
+  const results = await Promise.allSettled([
+    peer.audioTx?.sender.replaceTrack(r.local.mic || null),
+    peer.videoTx?.sender.replaceTrack(r.local.cam || null),
+  ]);
+  if (results.some((x) => x.status === 'rejected')) {
+    for (const [sess, current] of r.peers) if (current === peer) closePeer(r, sess);
+  }
 }
 
 function closePeer(r, sess) {
   const peer = r.peers.get(sess);
   if (!peer) return;
-  peer.pc.close();
   r.peers.delete(sess);
+  peer.pc.close();
+  peer.analyser?.disconnect();
 }
 
 async function callPeer(r, sess) {
@@ -99,14 +129,16 @@ async function callPeer(r, sess) {
   // Both transceivers exist from the start, so turning the camera/mic on later is a replaceTrack, not a renegotiation.
   peer.audioTx = peer.pc.addTransceiver('audio', { direction: 'sendrecv' });
   peer.videoTx = peer.pc.addTransceiver('video', { direction: 'sendrecv' });
-  attachLocal(r, peer);
+  await attachLocal(r, peer);
+  if (room !== r || !r.joined || r.peers.get(sess) !== peer) return;
   await peer.pc.setLocalDescription(await peer.pc.createOffer());
   await waitForIce(peer.pc);
-  if (room !== r) return;
+  if (room !== r || !r.joined || r.peers.get(sess) !== peer) return;
   await signalPeer(r, sess, 'offer', { sdp: peer.pc.localDescription.sdp });
 }
 
 async function onSignal(r, s) {
+  if (room !== r || !r.joined) return;
   if (s.kind === 'bye') { closePeer(r, s.from); return; }
   if (s.kind === 'offer') {
     closePeer(r, s.from);
@@ -116,10 +148,11 @@ async function onSignal(r, s) {
       t.direction = 'sendrecv';
       if (t.receiver.track.kind === 'audio') peer.audioTx = t; else peer.videoTx = t;
     }
-    attachLocal(r, peer);
+    await attachLocal(r, peer);
+    if (room !== r || !r.joined || r.peers.get(s.from) !== peer) return;
     await peer.pc.setLocalDescription(await peer.pc.createAnswer());
     await waitForIce(peer.pc);
-    if (room !== r) return;
+    if (room !== r || !r.joined || r.peers.get(s.from) !== peer) return;
     await signalPeer(r, s.from, 'answer', { sdp: peer.pc.localDescription.sdp });
   } else if (s.kind === 'answer') {
     const peer = r.peers.get(s.from);
@@ -128,17 +161,36 @@ async function onSignal(r, s) {
 }
 
 async function heartbeat(r) {
-  if (r.beating || room !== r) return;
+  if (r.beating || room !== r || !r.joined) return;
   r.beating = true;
+  const generation = r.mediaGeneration;
   try {
     const res = await api(`/teams/${r.teamId}/room/heartbeat`,
       { session: r.session, cam: !!r.local.cam, talking: r.local.talking, since: r.since,
-        caption: r.caption.slice(-200), transcript_since: r.lines.at(-1)?.id || 0 });
-    if (room !== r) return;
+        caption: r.caption.slice(-200), transcript_since: r.lines.at(-1)?.id || 0 }, { timeoutMs: 8000 });
+    if (room !== r || !r.joined || r.mediaGeneration !== generation) return;
+    if (res.instance && res.instance !== r.instance) {
+      if (r.instance) {
+        r.since = 0; r.signalEpoch = (r.signalEpoch || 0) + 1; r.signalQueues = new Map();
+        for (const sess of [...r.peers.keys()]) closePeer(r, sess);
+      }
+      r.instance = res.instance;
+    }
+    r.connectionStatus = 'In call';
+    paintCallStatus(r);
     addLines(r, res.transcript);
+    const signalEpoch = r.signalEpoch || 0;
     for (const s of res.signals) {
       r.since = Math.max(r.since, s.id);
-      await onSignal(r, s).catch((e) => console.warn('signal failed', e));
+      // ICE gathering must not hold up presence heartbeats; preserve ordering per teammate.
+      r.signalQueues ||= new Map();
+      const queued = (r.signalQueues.get(s.from) || Promise.resolve()).then(() => {
+        if (r.mediaGeneration === generation && (r.signalEpoch || 0) === signalEpoch) return onSignal(r, s);
+      }).catch((e) => {
+        console.warn('signal failed', e); closePeer(r, s.from);
+      });
+      r.signalQueues.set(s.from, queued);
+      queued.finally(() => { if (r.signalQueues.get(s.from) === queued) r.signalQueues.delete(s.from); });
     }
     r.participants = res.participants;
     const present = new Set(res.participants.map((p) => p.session));
@@ -149,52 +201,111 @@ async function heartbeat(r) {
       // Lower session id offers; retry if a connection never came up.
       const stuck = peer && peer.pc.connectionState !== 'connected' && Date.now() - peer.created > 15000;
       if (stuck) closePeer(r, p.session);
-      if ((!peer || stuck) && r.session < p.session) callPeer(r, p.session).catch((e) => console.warn('call failed', e));
+      if ((!peer || stuck) && r.session < p.session) callPeer(r, p.session).catch((e) => {
+        console.warn('call failed', e); closePeer(r, p.session);
+      });
     }
     paintTiles(r);
   } catch (e) {
-    if (e.status === 403) { toast(e.message, true); leaveRoom(); }
+    if (room !== r || !r.joined || r.mediaGeneration !== generation) return;
+    r.connectionStatus = 'Reconnecting…';
+    paintCallStatus(r);
+    if (e.status === 401 || e.status === 403) { stopCall(r); toast(e.message + ' — try joining again.', true); }
   } finally {
-    r.beating = false;
+    if (r.mediaGeneration === generation) r.beating = false;
   }
 }
 
 // ---------- local media ----------
 
+function joinCall(r) {
+  if (room !== r || r.joined) return;
+  r.joined = true;
+  r.session = newSession();
+  r.mediaGeneration = (r.mediaGeneration || 0) + 1;
+  r.connectionStatus = 'Connecting…';
+  r.mediaError = '';
+  const Context = window.AudioContext || window.webkitAudioContext;
+  try {
+    if (Context) { r.audioCtx = new Context(); r.audioCtx.resume().catch(() => {}); }
+  } catch (e) { console.warn('Audio initialization failed', e); }
+  meterLoop(r);
+  paintControls(r);
+  paintTiles(r);
+  r.beatTimer = setInterval(() => heartbeat(r), HEARTBEAT_MS);
+  heartbeat(r);
+}
+
 function mediaError(e) {
   if (!navigator.mediaDevices) return 'Camera and mic need HTTPS (or localhost) — open the site over https.';
   if (e && e.name === 'NotAllowedError') return 'Permission denied — allow camera/mic in your browser’s site settings.';
   if (e && e.name === 'NotFoundError') return 'No camera or microphone found.';
+  if (e && e.name === 'NotReadableError') return 'Camera or microphone is busy. Close other apps using it, then try again.';
   return 'Couldn’t start camera/mic: ' + (e?.message || e);
 }
 
 async function toggleCamera(r) {
+  if (room !== r || !r.joined || r.cameraBusy) return;
+  const generation = r.mediaGeneration;
+  r.cameraBusy = true;
+  r.mediaError = '';
+  paintControls(r);
+  try {
   if (r.local.cam) {
     r.local.cam.stop();
     r.local.cam = null;
   } else {
     try {
-      const s = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 360 } });
+      const s = await navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 640 }, height: { ideal: 360 } } });
+      if (room !== r || !r.joined || r.mediaGeneration !== generation) { s.getTracks().forEach((t) => t.stop()); return; }
       r.local.cam = s.getVideoTracks()[0];
-    } catch (e) { toast(mediaError(e), true); return; }
+      if (!r.local.cam) { s.getTracks().forEach((t) => t.stop()); throw new Error('No video track was returned'); }
+      const track = r.local.cam;
+      track.addEventListener('ended', () => {
+        if (room !== r || r.local.cam !== track) return;
+        r.local.cam = null;
+        r.mediaError = 'Camera stopped. Turn it on again to reconnect.';
+        for (const peer of r.peers.values()) attachLocal(r, peer);
+        paintTiles(r); paintControls(r); heartbeat(r);
+      });
+    } catch (e) {
+      if (room === r && r.mediaGeneration === generation) { r.mediaError = mediaError(e); toast(r.mediaError, true); }
+      return;
+    }
   }
   for (const peer of r.peers.values()) attachLocal(r, peer);
-  const v = tileFor(r, r.session)?.querySelector('video');
-  if (v) v.srcObject = r.local.cam ? new MediaStream([r.local.cam]) : null;
-  paintControls(r);
+  paintTiles(r); // local preview must work even while signaling is reconnecting
   heartbeat(r);
+  } finally {
+    if (room === r && r.mediaGeneration === generation) { r.cameraBusy = false; paintControls(r); }
+  }
 }
 
 async function setTalking(r, on) {
+  if (room !== r || !r.joined) return;
   r.pressed = on;
   if (on && !r.local.mic) {
+    if (r.micBusy) return;
+    const generation = r.mediaGeneration;
+    r.micBusy = true;
     try {
       const s = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-      if (room !== r) { s.getTracks().forEach((t) => t.stop()); return; }
+      if (room !== r || !r.joined || r.mediaGeneration !== generation) { s.getTracks().forEach((t) => t.stop()); return; }
       r.local.mic = s.getAudioTracks()[0];
+      if (!r.local.mic) { s.getTracks().forEach((t) => t.stop()); throw new Error('No audio track was returned'); }
+      r.local.mic.enabled = r.pressed;
+      const track = r.local.mic;
+      track.addEventListener('ended', () => {
+        if (room !== r || r.local.mic !== track) return;
+        r.local.mic = null; r.local.talking = r.pressed = false;
+        stopCaptions(r);
+        paintControls(r); paintTiles(r); heartbeat(r);
+      });
       for (const peer of r.peers.values()) attachLocal(r, peer);
-    } catch (e) { r.pressed = false; toast(mediaError(e), true); return; }
+    } catch (e) { if (room === r && r.mediaGeneration === generation) { r.pressed = false; toast(mediaError(e), true); } return; }
+    finally { if (r.mediaGeneration === generation) r.micBusy = false; }
   }
+  if (room !== r || !r.joined) return;
   // The mic track stays attached to every connection; holding the button just un-mutes it.
   if (r.local.mic) r.local.mic.enabled = r.pressed;
   if (r.local.talking !== r.pressed) {
@@ -211,10 +322,12 @@ async function setTalking(r, on) {
 function startCaptions(r) {
   if (!SpeechRec || !r.transcribe || r.rec) return;
   const rec = new SpeechRec();
+  const generation = r.mediaGeneration;
   rec.lang = navigator.language || 'en-US';
   rec.continuous = true;
   rec.interimResults = true;
   rec.onresult = (e) => {
+    if (room !== r || r.mediaGeneration !== generation || r.rec !== rec) return;
     let interim = '';
     for (let i = e.resultIndex; i < e.results.length; i++) {
       const res = e.results[i];
@@ -234,6 +347,7 @@ function startCaptions(r) {
     }
   };
   rec.onend = () => {
+    if (room !== r || r.mediaGeneration !== generation || r.rec !== rec) return;
     // Words still in flight when you let go are kept rather than dropped.
     if (r.caption) postLine(r, r.caption);
     r.caption = '';
@@ -246,7 +360,7 @@ function startCaptions(r) {
 }
 
 function stopCaptions(r) {
-  r.rec?.stop(); // onend flushes the last words
+  try { r.rec?.stop(); } catch (e) { /* recognition may already be stopped */ }
 }
 
 function postLine(r, words) {
@@ -307,7 +421,9 @@ function paintTiles(r) {
   const box = document.getElementById('tiles');
   if (!box || room !== r) return;
   const people = r.members;
-  const list = r.joined ? r.participants : [];
+  const list = r.joined ? [...r.participants] : [];
+  // Local video must be visible before the server responds or when presence resets.
+  if (r.joined && !list.some((p) => p.session === r.session)) list.unshift({ session: r.session, user_id: me.id });
   if (!r.joined) {
     box.innerHTML = `<div class="tiles-empty">${r.members.filter((m) => m.where === 'room').map((m) => avatar(m, 'lg')).join('') || ''}
       <p class="small muted">${r.members.filter((m) => m.where === 'room').length ? 'Teammates are in the call.' : 'Nobody is in the call yet.'}</p></div>`;
@@ -329,11 +445,17 @@ function paintTiles(r) {
         <div class="tile-label"><span class="tile-name">${esc(u.name)}${mine ? ' (you)' : ''}</span><span class="tile-state"></span></div>`;
       box.append(tile);
       const v = tile.querySelector('video');
-      if (mine && r.local.cam) v.srcObject = new MediaStream([r.local.cam]);
       const peer = r.peers.get(p.session);
       if (!mine && peer) { v.srcObject = peer.stream; v.play().catch(() => {}); }
     }
     const cam = mine ? !!r.local.cam : p.cam;
+    if (mine) {
+      const video = tile.querySelector('video');
+      if (video.srcObject?.getVideoTracks()[0] !== r.local.cam) {
+        video.srcObject = r.local.cam ? new MediaStream([r.local.cam]) : null;
+        if (r.local.cam) video.play().catch(() => {});
+      }
+    }
     const peer = r.peers.get(p.session);
     tile.classList.toggle('cam-on', cam);
     if (mine) tile.classList.toggle('talking', r.local.talking);
@@ -395,8 +517,10 @@ function paintTalkers(r) {
 }
 
 function paintControls(r) {
+  if (room !== r) return;
   const el = document.getElementById('call-controls');
   if (!el) return;
+  paintCallStatus(r);
   if (!r.joined) {
     el.innerHTML = `<button class="btn" data-room="join">🎧 Join the call</button>
       <p class="small muted" style="margin:6px 0 0">Camera stays off until you turn it on. Video and voice go straight to your teammates’ browsers and are never recorded.
@@ -405,10 +529,18 @@ function paintControls(r) {
   }
   el.innerHTML = `<div class="row">
     <button class="btn ptt ${r.local.talking ? 'on' : ''}" data-room="talk" aria-pressed="${r.local.talking}">🎙 ${r.local.talking ? 'Talking…' : 'Hold to talk'}</button>
-    <button class="btn ghost ${r.local.cam ? 'on' : ''}" data-room="cam">📷 Camera ${r.local.cam ? 'on' : 'off'}</button>
+    <button class="btn ghost ${r.local.cam ? 'on' : ''}" data-room="cam" aria-pressed="${!!r.local.cam}" ${r.cameraBusy ? 'disabled' : ''}>${r.cameraBusy ? 'Starting camera…' : `📷 Camera ${r.local.cam ? 'on' : 'off'}`}</button>
     <button class="btn ghost ${r.transcribe ? 'on' : ''}" data-room="transcribe" ${SpeechRec ? '' : 'disabled title="Speech-to-text needs Chrome, Edge or Safari"'}>📝 Transcribe me: ${SpeechRec ? (r.transcribe ? 'on' : 'off') : 'n/a'}</button>
     <button class="btn danger" data-room="leave">Leave call</button></div>
-    <p class="small muted" style="margin:6px 0 0">Hold the button or the <kbd>Space</kbd> bar — everyone in the call hears you while it’s held${r.transcribe && SpeechRec ? ', and your words are transcribed' : ''}.</p>`;
+    <p class="small muted" style="margin:6px 0 0">Hold the button or the <kbd>Space</kbd> bar — everyone in the call hears you while it’s held${r.transcribe && SpeechRec ? ', and your words are transcribed' : ''}.</p>
+    ${r.mediaError ? `<p class="small" role="alert">${esc(r.mediaError)}</p>` : ''}`;
+  paintCallStatus(r);
+}
+
+function paintCallStatus(r) {
+  if (room !== r) return;
+  const status = document.getElementById('call-status');
+  if (status) status.textContent = r.joined ? r.connectionStatus || 'Connecting…' : '';
 }
 
 function previewFrame(url) {
@@ -473,7 +605,7 @@ function previewMeta(p) {
 async function viewRoom(id, params) {
   if (!me) { location.hash = '#/join'; return ''; }
   const startTab = params?.get?.('tab') === 'lab' ? 'lab' : 'room';
-  const d = await api(`/teams/${id}/room`);
+  const d = await api(`/teams/${id}/room`, undefined, { timeoutMs: 10000 });
   const t = d.team;
   const html = `<div class="room-page"><div class="row spread"><div><div class="row small muted"><a href="#/t/${t.id}">← ${esc(t.name)}</a>${pill(t.challenge_status)}
       <span>${esc(t.challenge_title)}</span></div><h1 style="margin:6px 0 0">${esc(t.name)} · Team Room</h1></div>
@@ -496,7 +628,7 @@ async function viewRoom(id, params) {
         <div class="frame" id="frame">${previewFrame(d.preview.url)}</div>
         <div class="small muted" id="preview-meta" style="padding:8px 12px">${previewMeta(d.preview)}</div>
       </section>
-      <section class="card call"><div class="row spread"><h3 style="margin:0">Call</h3><span class="small" id="talkers"></span></div>
+      <section class="card call"><div class="row spread"><h3 style="margin:0">Call</h3><span class="small muted" id="call-status" role="status"></span><span class="small" id="talkers"></span></div>
         <div class="tiles" id="tiles"></div><div id="call-controls"></div></section>
     </div>
     <section class="card section transcript">
@@ -516,6 +648,7 @@ async function viewRoom(id, params) {
     const r = room = {
       teamId: t.id, session: newSession(), joined: false, members: d.members, participants: [],
       peers: new Map(), local: { cam: null, mic: null, talking: false }, since: 0, pressed: false,
+      mediaGeneration: 0, cameraBusy: false, micBusy: false, connectionStatus: '',
       previewUrl: d.preview.url, caption: '', lines: [], rec: null, transcribe: !!SpeechRec && transcribePref(),
     };
     paintTiles(r);
@@ -554,7 +687,7 @@ async function viewRoom(id, params) {
     };
     const refresh = async () => {
       r.lastRefresh = Date.now();
-      const next = await api(`/teams/${t.id}/room`);
+      const next = await api(`/teams/${t.id}/room`, undefined, { timeoutMs: 8000 });
       if (room !== r) return;
       r.members = next.members;
       setPanel('doing', doingPanel(next));
@@ -612,12 +745,7 @@ async function viewRoom(id, params) {
       const b = e.target.closest('[data-room]');
       if (!b) return;
       if (b.dataset.room === 'join') {
-        r.joined = true;
-        r.audioCtx = new AudioContext(); // created inside the click so remote audio may autoplay
-        meterLoop(r);
-        paintControls(r);
-        await heartbeat(r);
-        r.beatTimer = setInterval(() => heartbeat(r), HEARTBEAT_MS);
+        joinCall(r);
       } else if (b.dataset.room === 'cam') {
         toggleCamera(r);
       } else if (b.dataset.room === 'transcribe') {
@@ -627,11 +755,8 @@ async function viewRoom(id, params) {
         paintControls(r);
         toast(r.transcribe ? 'Your words will be transcribed for the team' : 'Transcription off — your voice still reaches the call');
       } else if (b.dataset.room === 'leave') {
-        const tid = r.teamId;
-        leaveRoom();
+        stopCall(r);
         toast('Left the call');
-        location.hash = `#/t/${tid}/room`;
-        render();
       }
     });
     controls.addEventListener('pointerdown', (e) => {

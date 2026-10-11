@@ -58,6 +58,7 @@ def demo_state():
                 db_path=path, quiet=True, auto_approve=2, react_times={},
                 agent_mode="simulated", agent_delay=0, demo_ritual=None,
                 synchronous_jobs=True,
+                room_instance=os.path.basename(os.path.dirname(path)),
             )
         return _state
 

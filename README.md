@@ -35,6 +35,12 @@ Set `OPENROUTER_API_KEY` in the server environment (Vercel: Production environme
 
 The floating Buildmate assistant now calls `/api/buildmate`: OpenRouter turns natural-language requests and follow-ups into validated filters and offers brief project/team advice. Existing live-data search renders real builders, teams, events, projects and challenges. It never lets the model supply profile cards or database IDs. The server sends the request, up to six recent chat messages, previous filters and public search vocabulary; it excludes private team-room content and credentials. If the provider fails or is unconfigured, the UI explicitly labels keyword fallback. AI requests have a 20-second timeout, bounded input/output, and demo instance limits of 15/minute and 100/hour; production requires a shared quota across instances.
 
+### Team Room media checks
+
+Run `node --test test_room.cjs` for camera/microphone lifecycle regressions with simulated devices. The room now renders local camera video independently of signaling, prevents concurrent permission requests, releases media acquired after leaving, handles disconnected devices, and retries transient network failures. Leaving a call keeps the Team Room open. Camera permission/device errors appear beside its controls; room-loading failures offer a retry button.
+
+Real multi-user calls still require shared persistent signaling storage and a TURN relay for networks where direct WebRTC is blocked. The Vercel demo's per-instance SQLite does not provide either; instance changes trigger reconnection without turning off local video. Automated media tests do not capture or verify a physical webcam.
+
 | # | Requirement | How it works |
 |---|---|---|
 | 1 | Hackers sign up / sign in | `#/join`: profile with skills, interests and timezone. These drive matching. |

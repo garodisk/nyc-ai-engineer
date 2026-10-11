@@ -1626,7 +1626,8 @@ def room_heartbeat(c, tid):
     transcript = []
     if b.get("transcript_since") is not None:
         transcript = transcript_lines(c.db, r["id"], int_field(b, "transcript_since", 0, 0, 10 ** 12), 50)
-    return 200, {"participants": room_participants(c.db, r["id"]), "signals": signals, "transcript": transcript}
+    return 200, {"participants": room_participants(c.db, r["id"]), "signals": signals, "transcript": transcript,
+                 "instance": getattr(c.srv, "room_instance", None)}
 
 
 @route("POST", r"/api/teams/(\d+)/room/signal")

@@ -10,15 +10,24 @@ let renderSeq = 0;
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-async function api(path, body) {
+async function api(path, body, { timeoutMs = 30000 } = {}) {
   const opts = { credentials: 'same-origin', headers: {} };
   if (body !== undefined) {
     opts.method = 'POST';
     opts.headers['Content-Type'] = 'application/json';
     opts.body = JSON.stringify(body);
   }
-  const res = await fetch('/api' + path, opts);
-  const data = await res.json().catch(() => ({}));
+  const controller = new AbortController();
+  opts.signal = controller.signal;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let res, data;
+  try {
+  res = await fetch('/api' + path, opts);
+  data = await res.json();
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('Connection timed out. Please try again.');
+    throw error;
+  } finally { clearTimeout(timer); }
   if (!res.ok) {
     const err = new Error(data.error || `Request failed (${res.status})`);
     err.status = res.status;
@@ -1250,7 +1259,7 @@ async function render() {
   const found = routes.find(([rx]) => rx.test(path));
   if (!found) { app.innerHTML = empty('Page not found. <a href="#/">Go home</a>'); return; }
   const args = path.match(found[0]).slice(1);
-  if (!app.innerHTML) app.innerHTML = '<div class="loading">Loading…</div>';
+  app.innerHTML = '<div class="loading" role="status">Loading…</div>';
   try {
     // Views take their route captures (missing optional ones as undefined) followed by the query params.
     const out = await found[1](...(args.length ? args : [params]), params);
@@ -1262,6 +1271,11 @@ async function render() {
     if (seq !== renderSeq) return;
     if (err.status === 401) { location.hash = '#/join'; return; }
     app.innerHTML = empty(esc(err.message));
+    const retry = document.createElement('button');
+    retry.className = 'btn';
+    retry.textContent = 'Try again';
+    retry.addEventListener('click', () => render());
+    app.append(retry);
   }
 }
 
