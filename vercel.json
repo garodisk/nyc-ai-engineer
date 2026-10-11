@@ -4,7 +4,7 @@
     {
       "src": "api/index.py",
       "use": "@vercel/python",
-      "config": { "includeFiles": ["server.py", "seed.py", "static/**"] }
+      "config": { "includeFiles": ["server.py", "seed.py", "buildmate_ai.py", "static/**"], "maxDuration": 30 }
     },
     { "src": "static/**", "use": "@vercel/static" }
   ],

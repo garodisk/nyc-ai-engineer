@@ -29,6 +29,12 @@ Demo accounts (sign-in is by handle only in this MVP): `ben` (has an invite), `l
 
 ## What it does
 
+### OpenRouter Buildmate
+
+Set `OPENROUTER_API_KEY` in the server environment (Vercel: Production environment variables), then redeploy. `OPENROUTER_MODEL` optionally overrides `google/gemini-2.5-flash-lite`. Local Python runs read process environment variables; `.env.example` lists the settings but `.env` is not automatically loaded.
+
+The floating Buildmate assistant now calls `/api/buildmate`: OpenRouter turns natural-language requests and follow-ups into validated filters and offers brief project/team advice. Existing live-data search renders real builders, teams, events, projects and challenges. It never lets the model supply profile cards or database IDs. The server sends the request, up to six recent chat messages, previous filters and public search vocabulary; it excludes private team-room content and credentials. If the provider fails or is unconfigured, the UI explicitly labels keyword fallback. AI requests have a 20-second timeout, bounded input/output, and demo instance limits of 15/minute and 100/hour; production requires a shared quota across instances.
+
 | # | Requirement | How it works |
 |---|---|---|
 | 1 | Hackers sign up / sign in | `#/join`: profile with skills, interests and timezone. These drive matching. |

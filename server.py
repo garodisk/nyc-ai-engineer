@@ -548,6 +548,24 @@ def new_session(c, uid):
 
 # --- auth & profile ---
 
+@route("POST", "/api/buildmate")
+def buildmate(c):
+    from buildmate_ai import interpret, BuildmateError
+    prompt = text(c.body, "prompt", True, 1200)
+    vocabulary = {name: set() for name in ("skills", "interests", "roles", "locations", "modes", "experience")}
+    for row in c.db.execute("SELECT skills,interests,title,city,country,collab,experience FROM users WHERE role='hacker'"):
+        vocabulary["skills"].update(jl(row["skills"]))
+        vocabulary["interests"].update(jl(row["interests"]))
+        for name, fields in (("roles", ["title"]), ("locations", ["city", "country"]),
+                             ("modes", ["collab"]), ("experience", ["experience"])):
+            vocabulary[name].update(row[field] for field in fields if row[field])
+    vocabulary = {key: sorted(values)[:120] for key, values in vocabulary.items()}
+    try:
+        answer = interpret(prompt, c.body.get("context"), c.body.get("history"), vocabulary)
+        return 200, answer
+    except BuildmateError as error:
+        return 200, {"provider": "keyword", "message": str(error)}
+
 @route("POST", "/api/signup")
 def signup(c):
     b = c.body

@@ -1,8 +1,8 @@
 'use strict';
 // Buildmate: a floating assistant that finds builders, teams, events, projects and sponsor challenges.
-// Ported from the companion Next.js demo's copilot: a deterministic keyword/rule search (no LLM), so it
-// never invents matches — when nothing fits it says so. Follow-ups ("only remote", "make that worldwide")
-// refine the previous search. Chat history lives in this browser only.
+// OpenRouter interprets intent on the server; deterministic filters retrieve actual live records.
+// Keyword search remains available when AI is unavailable. History is stored in this browser;
+// the last few chat messages and filters are sent to OpenRouter when asking for AI assistance.
 // Loaded before app.js; uses its globals (api, esc, me, toast, …) at call time.
 
 const BM_KEY = 'aoh-buildmate-v1';
@@ -94,13 +94,13 @@ function bmBuilderResult(b, c) {
   return { kind: 'builders', id: b.id, title: b.name, subtitle: `${b.role || 'Builder'} · ${b.city || '—'}`, detail: b.bio, tags: b.skills, reasons };
 }
 
-function bmAnswer(prompt, data, previous) {
-  const c = bmParse(prompt, data, previous);
+function bmAnswer(prompt, data, previous, aiContext) {
+  const c = aiContext || bmParse(prompt, data, previous);
   const filters = [...(c.location ? [c.location] : ['Worldwide']), ...c.skills, ...(c.anySkill && c.skills.length > 1 ? ['Any listed skill'] : []),
     ...[c.interest, c.role, c.experience, c.mode].filter(Boolean), ...(c.hours ? [`${c.hours}+ hours/week`] : []), ...(c.savedOnly ? ['Saved builders'] : [])];
   const reply = (text, results, suggestions) => ({ text, results, context: c, filters, suggestions });
   if (c.kind === 'overview') {
-    return reply(`I can search ${data.builders.length} builders, ${data.teams.length} teams, ${data.events.length} events, ${data.projects.length} projects, and ${data.challenges.length} sponsor challenges. Tell me the skills, location, or project idea. I use rules and keyword matching—not an AI model—so I never make up matches.`,
+    return reply(`I can search ${data.builders.length} builders, ${data.teams.length} teams, ${data.events.length} events, ${data.projects.length} projects, and ${data.challenges.length} sponsor challenges. Tell me the skills, location, or project idea. Result cards come from the live database.`,
       [], ['Find 3 React builders worldwide', 'Find in-person hackathons in Berlin', 'Show projects using Python']);
   }
   if (c.kind === 'builders') {
@@ -173,7 +173,7 @@ async function bmLoadData() {
 
 // ---------- the panel ----------
 
-const bm = { open: false, messages: [BM_INTRO], context: null, data: null };
+const bm = { open: false, messages: [BM_INTRO], context: null, data: null, busy: false, provider: '' };
 
 function bmRestore() {
   try {
@@ -213,23 +213,36 @@ function bmPaint() {
       ${m.id === 'intro' ? `<div class="chat-starters">${BM_STARTERS.map((s) => `<button type="button" data-bm-say="${esc(s)}">💬 ${esc(s)}</button>`).join('')}</div>` : ''}</div>`).join('');
   box.scrollTop = box.scrollHeight;
   const d = bm.data;
-  document.getElementById('bm-source').innerHTML = d ? `<i class="dot"></i>${d.builders.length} builders · ${d.teams.length} open teams · ${d.events.length} events <span>LIVE DATA</span>` : '<i class="dot"></i>Loading…';
+  document.getElementById('bm-source').innerHTML = d ? `<i class="dot"></i>${d.builders.length} builders · ${d.teams.length} open teams · ${d.events.length} events <span>${bm.busy ? 'THINKING…' : bm.provider === 'openrouter' ? 'OPENROUTER AI' : bm.provider === 'keyword' ? 'KEYWORD FALLBACK' : 'LIVE DATA'}</span>` : '<i class="dot"></i>Loading…';
 }
 
 async function bmSend(prompt) {
   const text = String(prompt || '').trim().slice(0, 1200);
-  if (!text) return;
+  if (!text || bm.busy) return;
+  bm.busy = true;
+  const send = document.querySelector('#bm-form button[type="submit"]');
+  if (send) send.disabled = true;
+  bmPaint();
   try {
     bm.data = await bmLoadData();  // always search the latest data
     await loadBuilderState().catch(() => null);
-  } catch (e) { toast(e.message, true); return; }
-  const reply = bmAnswer(text, bm.data, bm.context);
+  let ai;
+  try {
+    ai = await api('/buildmate', { prompt: text, context: bm.context,
+      history: bm.messages.filter((m) => m.id !== 'intro').slice(-6).map((m) => ({ role: m.role, text: m.text })) });
+  } catch (e) { ai = { provider: 'keyword', message: 'AI is temporarily unavailable. Using keyword search.' }; }
+  bm.provider = ai.provider;
+  const reply = bmAnswer(text, bm.data, bm.context, ai.provider === 'openrouter' ? ai.context : null);
+  reply.text = `${ai.message ? `${ai.message}\n\n` : ''}${reply.text}`;
+  reply.provider = ai.provider;
   bm.messages = [...bm.messages, { id: `u${Date.now()}`, role: 'user', text }, { id: `a${Date.now()}`, role: 'assistant', text: reply.text, reply }].slice(-30);
   bm.context = reply.context;
   bmPersist();
   const input = document.getElementById('bm-input');
   if (input) input.value = '';
   bmPaint();
+  } catch (e) { toast(e.message, true); }
+  finally { bm.busy = false; if (send) send.disabled = false; bmPaint(); }
 }
 
 function bmToggle(open) {
@@ -260,7 +273,7 @@ function mountBuildmate() {
       <form class="chat-composer" id="bm-form"><label class="sr-only" for="bm-input">Message Buildmate</label>
         <textarea id="bm-input" rows="2" maxlength="1200" placeholder="Find 3 people with React in New York…"></textarea>
         <button type="submit" aria-label="Send">↑</button></form>
-      <p class="chat-disclosure">Keyword & rule search over live data · No AI model · Never invents matches</p>
+      <p class="chat-disclosure">OpenRouter AI interprets your request · Cards use live data · Recent chat is sent to OpenRouter</p>
     </section>`;
   document.body.append(...wrap.children);
   document.getElementById('bm-launcher').addEventListener('click', () => bmToggle());
@@ -278,7 +291,7 @@ function mountBuildmate() {
     const act = b.dataset.bm;
     try {
       if (act === 'close') bmToggle(false);
-      else if (act === 'new') { bm.messages = [BM_INTRO]; bm.context = null; bmPersist(); bmPaint(); }
+      else if (act === 'new' && !bm.busy) { bm.messages = [BM_INTRO]; bm.context = null; bm.provider = ''; bmPersist(); bmPaint(); }
       else if (act === 'save') {
         const on = await toggleSaveBuilder(+b.dataset.id);
         b.classList.toggle('is-saved', on);
