@@ -294,7 +294,7 @@ async function viewHome() {
       <h1>Your next big idea<br>starts with<br><em>a stranger.</em><span class="hero-star">✳</span></h1>
       <p class="lede">Rolling sponsor challenges and a fresh open sprint every Monday. Find a team in minutes, ship something this week, demo it live.</p>
       <div class="row">
-        <a class="btn lg" href="#/teams">Find your teammates ↗</a>
+        <a class="btn lg" href="#/builders">Find your teammates ↗</a>
         <a class="btn lg ghost" href="#/challenges">Explore hackathons →</a>
       </div>
       ${me ? '' : '<p class="hero-note">No application, no waitlist. <a href="#/join">Join in 30 seconds →</a></p>'}
