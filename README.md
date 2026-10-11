@@ -6,7 +6,7 @@
 
 ### Vercel demo hosting
 
-`vercel.json` serves the frontend and routes the API to `api/index.py`. The adapter seeds SQLite in the function's temporary directory. Data and sessions can reset on cold starts, new deployments, or another instance; different visitors may reach different instances. This deployment is for exploring the demo, not reliable shared collaboration or storing real event data.
+`vercel.json` serves the frontend and routes the API to `api/index.py`. The adapter seeds SQLite in the function's temporary directory. Data can reset on cold starts, new deployments, or another instance; different visitors may reach different instances. Configure a stable random `AOH_DEMO_SESSION_SECRET` in Vercel Production: seeded demo accounts then use signed, HttpOnly cookies valid for 30 days across instance resets and deployments. Keep this secret stable; rotating it invalidates these cookies. Newly created profiles still depend on temporary storage. This deployment is for exploring the demo, not reliable shared collaboration or storing real event data.
 
 The Vercel demo always uses the simulated Build lab agent and needs no API keys. Join auto-approvals and simulated agent tasks finish inside their request so serverless shutdown cannot interrupt background work. The regular local server retains its original background behavior. Files containing credentials, `.env`, databases, and `.vercel` state are excluded from Git.
 
