@@ -1,0 +1,25 @@
+# Dependencies and generated output
+node_modules/
+.next/
+.next-dev/
+out/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+*.log
+
+# Secrets and local environment files
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets.json
+
+# Local editor / OS files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
