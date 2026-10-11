@@ -41,6 +41,12 @@ Run `node --test test_room.cjs` for camera/microphone lifecycle regressions with
 
 Real multi-user calls still require shared persistent signaling storage and a TURN relay for networks where direct WebRTC is blocked. The Vercel demo's per-instance SQLite does not provide either; instance changes trigger reconnection without turning off local video. Automated media tests do not capture or verify a physical webcam.
 
+### End-to-end regression checks
+
+Run `python -m unittest -q` and `node --test test_ui.cjs test_room.cjs test_stage.cjs`. The API suite covers signup, team creation, invitations and approvals, room status and transcripts, project shipping, stage start/end, sponsor support/analytics, judging, and role access restrictions. The browser lifecycle suite uses simulated media devices and controllable network responses.
+
+The Vercel adapter preserves seeded demo memberships and departures in signed session cookies across instance resets. It does not persist newly created users, teams, submissions, invitations, saved builders, or shared live-stage signaling. These require a shared database; browser previews and passing local tests do not establish a reliable multi-user broadcast on Vercel.
+
 | # | Requirement | How it works |
 |---|---|---|
 | 1 | Hackers sign up / sign in | `#/join`: profile with skills, interests and timezone. These drive matching. |

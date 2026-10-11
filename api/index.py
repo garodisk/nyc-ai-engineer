@@ -19,8 +19,8 @@ _lock = threading.Lock()
 _state = None
 
 
-def sign_demo_session(handle, secret, expires=None, teams=None):
-    claims = json.dumps({"handle": handle, "teams": teams or [], "expires": expires if expires is not None else int(time.time()) + 30 * server.DAY},
+def sign_demo_session(handle, secret, expires=None, teams=None, left=None):
+    claims = json.dumps({"handle": handle, "teams": teams or [], "left": left or [], "expires": expires if expires is not None else int(time.time()) + 30 * server.DAY},
                         separators=(",", ":")).encode()
     encoded = base64.urlsafe_b64encode(claims).decode().rstrip("=")
     signature = hmac.new(secret.encode(), ("aoh-demo-v1." + encoded).encode(), hashlib.sha256).hexdigest()
@@ -56,6 +56,9 @@ def demo_state():
             seed.seed_hackathons(path)
             db = server.connect(path)
             seeded_team_ids = {r["id"] for r in db.execute("SELECT id FROM teams")}
+            seeded_memberships = {}
+            for r in db.execute("SELECT u.handle, m.team_id FROM members m JOIN users u ON u.id=m.user_id"):
+                seeded_memberships.setdefault(r["handle"], set()).add(r["team_id"])
             db.close()
             _state = SimpleNamespace(
                 db_path=path, quiet=True, auto_approve=2, react_times={},
@@ -63,6 +66,7 @@ def demo_state():
                 synchronous_jobs=True,
                 room_instance=os.path.basename(os.path.dirname(path)),
                 seeded_team_ids=seeded_team_ids,
+                seeded_memberships=seeded_memberships,
             )
         return _state
 
@@ -83,6 +87,14 @@ class handler(server.Handler):
             if user:
                 encoded = token.split(".")[1]
                 claims = json.loads(base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4)))
+                left = claims.get("left", [])
+                if isinstance(left, list) and len(left) <= 100:
+                    for tid in left:
+                        if type(tid) is int and tid in self.server.seeded_memberships.get(handle, set()):
+                            try:
+                                server.leave_team(server.Ctx(db, user, {}, {}, self.server), str(tid))
+                            except server.ApiError:
+                                pass
                 teams = claims.get("teams", [])
                 if isinstance(teams, list) and len(teams) <= 100:
                     for tid in teams:
@@ -101,7 +113,7 @@ class handler(server.Handler):
 
     def send_json(self, status, payload, cookie=None):
         secret = os.environ.get("AOH_DEMO_SESSION_SECRET", "")
-        membership_change = self.command == "POST" and (self.path.startswith("/api/teams/") or self.path.startswith("/api/requests/")) and 200 <= status < 300
+        membership_change = self.command == "POST" and ((self.path.startswith("/api/teams/") and self.path.split('?')[0].endswith(("/join", "/leave"))) or self.path.startswith("/api/requests/")) and 200 <= status < 300
         if secret and (cookie or membership_change):
             db = server.connect(self.server.db_path)
             try:
@@ -113,7 +125,8 @@ class handler(server.Handler):
                     user = db.execute("SELECT id, handle FROM users WHERE handle=?", (handle,)).fetchone() if handle else None
                 if user:
                     teams = [r["team_id"] for r in db.execute("SELECT team_id FROM members WHERE user_id=?", (user["id"],)) if r["team_id"] in self.server.seeded_team_ids]
-                    cookie = sign_demo_session(user["handle"], secret, teams=teams)
+                    left = sorted(self.server.seeded_memberships.get(user["handle"], set()) - set(teams))
+                    cookie = sign_demo_session(user["handle"], secret, teams=teams, left=left)
             finally:
                 db.close()
         return super().send_json(status, payload, cookie)

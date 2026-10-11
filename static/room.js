@@ -590,11 +590,12 @@ async function finishProject(t) {
     <label>What does it do?<textarea name="description" maxlength="1200" rows="3">${esc(sub.description)}</textarea></label>
     <div class="form-grid"><label>Repo URL<input name="repo_url" type="url" placeholder="https://github.com/…" value="${esc(sub.repo_url)}"></label>
     <label>Live demo URL<input name="demo_url" type="url" placeholder="https://…" value="${esc(sub.demo_url || room?.previewUrl || '')}"></label></div>`,
-  '🏁 Ship it', async (v) => {
+  '🏁 Ship it', async (v, close) => {
     const r = await api(`/teams/${t.id}/finish`, v);
-    await refreshMe();
+    close();
     toast(`Shipped 🏁${r.withdrawn ? ` — ${r.withdrawn} pending request${r.withdrawn > 1 ? 's' : ''} withdrawn` : ''}`);
     location.hash = `#/t/${t.id}/stage`;
+    await refreshMe();
   });
 }
 

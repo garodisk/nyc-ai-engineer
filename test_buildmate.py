@@ -46,6 +46,14 @@ class BuildmateTest(unittest.TestCase):
         self.assertIn("authentication failed", str(caught.exception))
         self.assertNotIn("secret", str(caught.exception))
 
+    def test_project_description_does_not_add_required_skills(self):
+        output = {"context": dict(ai.DEFAULTS, location="New York", skills=["React", "AI"], interest="AI"), "message": "Looking for builders."}
+        encoded = json.dumps({"choices": [{"message": {"content": json.dumps(output)}}]}).encode()
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-secret"}), patch.object(ai, "urlopen", return_value=io.BytesIO(encoded)):
+            context = ai.interpret("Find React builders in NYC for my AI project", None, [], {})["context"]
+        self.assertEqual(context["skills"], ["React"])
+        self.assertEqual(context["interest"], "")
+
     def test_endpoint_uses_public_vocabulary_and_explicit_fallback(self):
         httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler)
         thread = threading.Thread(target=httpd.serve_forever, daemon=True)

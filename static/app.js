@@ -4,6 +4,8 @@ const app = document.getElementById('app');
 const nav = document.getElementById('nav');
 let me = null;
 let renderSeq = 0;
+let authEpoch = 0;
+let meRequestSeq = 0;
 
 // ---------- utilities ----------
 
@@ -23,7 +25,11 @@ async function api(path, body, { timeoutMs = 30000 } = {}) {
   let res, data;
   try {
   res = await fetch('/api' + path, opts);
-  data = await res.json();
+  try { data = await res.json(); }
+  catch (error) {
+    if (error.name === 'AbortError') throw error;
+    throw new Error(res.ok ? 'The server returned an invalid response. Please try again.' : `Server unavailable (${res.status}). Please try again.`);
+  }
   } catch (error) {
     if (error.name === 'AbortError') throw new Error('Connection timed out. Please try again.');
     throw error;
@@ -110,6 +116,7 @@ function onSubmit(selector, handler) {
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = form.querySelector('button[type=submit], button:not([type])');
+    if (btn?.disabled) return;
     if (btn) btn.disabled = true;
     try { await handler(formValues(form), form); } catch (err) { toast(err.message, true); } finally { if (btn) btn.disabled = false; }
   });
@@ -138,8 +145,11 @@ function modal(title, bodyHtml, okLabel, onOk) {
 }
 
 async function refreshMe() {
+  const epoch = authEpoch, request = ++meRequestSeq;
   const before = `${me?.id}:${me?.tz}:${(me?.teams || []).map((t) => t.id)}`;
-  me = (await api('/me')).user;
+  const user = (await api('/me')).user;
+  if (epoch !== authEpoch || request !== meRequestSeq) return;
+  me = user;
   renderNav();
   // The clock bar's region and deadline are per person: refresh it when who you are, your timezone or your teams change.
   if (`${me?.id}:${me?.tz}:${(me?.teams || []).map((t) => t.id)}` !== before) refreshClock();
@@ -1062,7 +1072,9 @@ async function viewJoin(params) {
       };
     });
     onSubmit('#signup', async (v) => {
+      authEpoch++;
       await api('/signup', { ...v, tz: +v.tz, skills: splitList(v.skills), interests: splitList(v.interests) });
+      authEpoch++;
       await refreshMe();
       toast(`Welcome, ${me.name.split(' ')[0]}!`);
       location.hash = home();
@@ -1074,7 +1086,9 @@ async function viewJoin(params) {
 const home = () => ({ sponsor: '#/sponsor', judge: '#/judge' }[me.role] || '#/teams');
 
 async function login(handle) {
+  authEpoch++;
   await api('/login', { handle });
+  authEpoch++;
   await refreshMe();
   toast(`Signed in as @${me.handle}`);
   location.hash = home();
@@ -1083,23 +1097,27 @@ async function login(handle) {
 
 // Demo mode: the server approves join requests on the owner's behalf after a short wait.
 async function awaitApproval(el, tid, seconds) {
+  const userId = me?.id, path = location.hash;
+  const active = () => me?.id === userId && location.hash === path;
   el.disabled = true;
   el.textContent = 'Waiting for approval…';
   toast(`Request sent — waiting for ${el.dataset.name} to approve…`);
   const deadline = Date.now() + seconds * 1000 + 6000;
   await new Promise((ok) => setTimeout(ok, seconds * 1000));
   while (Date.now() < deadline) {
+    if (!active()) return;
     const t = (await api(`/teams/${tid}`)).team;
-    if (t.members.some((m) => m.id === me.id)) {
+    if (!active()) return;
+    if (t.members.some((m) => m.id === userId)) {
       await refreshMe();
+      if (!active()) return;
       toast(`You're in! Welcome to ${t.name} 🎉`);
       location.hash = `#/t/${tid}/room`;
       return;
     }
     await new Promise((ok) => setTimeout(ok, 500));
   }
-  toast('Still pending — the team owner will decide');
-  render();
+  if (active()) { toast('Still pending — the team owner will decide'); render(); }
 }
 
 // ---------- actions ----------
@@ -1107,7 +1125,7 @@ async function awaitApproval(el, tid, seconds) {
 const actions = {
   menu: () => nav.classList.toggle('open'),
   buildmate: () => bmToggle(true),
-  async logout() { await api('/logout', {}); me = null; renderNav(); location.hash = '#/'; },
+  async logout() { authEpoch++; await api('/logout', {}); authEpoch++; me = null; renderNav(); location.hash = '#/'; },
   'login-as': (el) => login(el.dataset.handle),
   scroll: (el) => document.getElementById(el.dataset.target)?.scrollIntoView({ behavior: 'smooth' }),
   async try(el) {
@@ -1198,11 +1216,15 @@ const actions = {
   },
 };
 
+const pendingActions = new WeakSet();
 document.addEventListener('click', async (e) => {
   const el = e.target.closest('[data-act]');
   if (!el) return;
   e.preventDefault();
+  if (pendingActions.has(el)) return;
+  pendingActions.add(el);
   try { await actions[el.dataset.act](el); } catch (err) { toast(err.message, true); }
+  finally { pendingActions.delete(el); }
 });
 
 // ---------- router ----------
@@ -1307,8 +1329,10 @@ setInterval(async () => {
   const before = me.unread;
   try { await refreshMe(); } catch { return; }
   if (me && me.unread > before) {
-    const latest = (await api('/notifications')).notifications[0];
-    if (latest) toast(latest.text);
+    try {
+      const latest = (await api('/notifications')).notifications[0];
+      if (latest && me) toast(latest.text);
+    } catch { /* Retry on the next notification poll. */ }
   }
 }, 20000);
 

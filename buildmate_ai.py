@@ -79,6 +79,9 @@ Use canonical vocabulary when available. Don't infer unstated location, seniorit
 EVERY unspecified string filter MUST be empty string, never 'any' or 'none'. Worldwide MUST be
 an empty location. Role is ONLY a filter when the user explicitly asks for that specific role.
 React does not imply Frontend engineer, and Python does not imply AI / ML engineer.
+Project context belongs in goal, not skills or interest: 'React builders in NYC for my AI project'
+means skills=[React], location=New York, interest='', goal='AI project'. Do not add AI as a skill.
+Only filter interests when the user asks for people interested in that domain.
 kind must be builders, teams, events, projects, challenges, or overview. Defaults: 3 results,
 no filters, false booleans, 0 hours. goal holds the user's project idea, otherwise empty.
 Never name or invent people, teams, events, counts, matches, availability, links or database facts:
@@ -110,6 +113,14 @@ Return only the required JSON object."""
             body = json.loads(response.read(100000))
         output = json.loads(body["choices"][0]["message"]["content"])
         context = clean_context(output["context"])
+        project = re.search(r"\bfor\s+(?:my|our|an?|the)\s+[^.!?]*?\b(?:project|app|idea|startup|product)\b", prompt, re.I)
+        if project and context["kind"] == "builders":
+            requested = prompt[:project.start()] + " " + prompt[project.end():]
+            previous_skills = clean_context(previous)["skills"] if previous else []
+            context["skills"] = [skill for skill in context["skills"]
+                                 if skill in previous_skills or re.search(r"(?<!\w)" + re.escape(skill) + r"(?!\w)", requested, re.I)]
+            if context["interest"] and not re.search(r"interest|passion|care about", requested, re.I):
+                context["interest"] = clean_context(previous)["interest"] if previous else ""
         # A skill or project idea alone must not silently impose a specific job title.
         if not re.search(r"designer|frontend|front.end|backend|back.end|full.stack|ml engineer|ai engineer|machine learning engineer", prompt, re.I):
             context["role"] = clean_context(previous)["role"] if previous else ""

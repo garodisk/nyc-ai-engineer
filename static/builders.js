@@ -18,8 +18,10 @@ const place = (b) => [b.city, b.country].filter(Boolean).join(', ') || 'Somewher
 async function loadBuilderState(force) {
   if (!me) { builderState = { saved: new Set(), connected: new Set(), loadedFor: null }; return builderState; }
   if (!force && builderState.loadedFor === me.id) return builderState;
+  const userId = me.id;
   const s = await api('/saved');
-  builderState = { saved: new Set(s.saved), connected: new Set(s.connected), loadedFor: me.id };
+  if (me?.id !== userId) return builderState;
+  builderState = { saved: new Set(s.saved), connected: new Set(s.connected), loadedFor: userId };
   return builderState;
 }
 
@@ -98,7 +100,8 @@ async function openBuilderProfile(id) {
   d.addEventListener('click', async (e) => {
     if (e.target === d || e.target.closest('.dialog-close')) { d.close(); return; }
     const a = e.target.closest('[data-p]');
-    if (!a) return;
+    if (!a || a.disabled) return;
+    a.disabled = true;
     try {
       if (a.dataset.p === 'connect') {
         const r = await api(`/people/${b.id}/connect`, {});
@@ -110,9 +113,10 @@ async function openBuilderProfile(id) {
         a.textContent = r ? '★ Saved' : '☆ Save';
       } else if (a.dataset.p === 'invite') {
         d.close();
-        openInviteBuilder(b);
+        await openInviteBuilder(b);
       }
     } catch (err) { toast(err.message, true); }
+    finally { a.disabled = false; }
   });
   d.showModal();
 }
@@ -148,12 +152,13 @@ async function openInviteBuilder(b) {
     if (e.target === d || e.target.closest('.dialog-close')) { d.close(); return; }
     const row = e.target.closest('[data-team]');
     if (!row || row.disabled) return;
+    row.disabled = true;
     try {
       await api(`/teams/${row.dataset.team}/invite`, { user_id: b.id, message: `Saw your profile — want to build with us?` });
       row.disabled = true;
       row.querySelector('b').textContent = '✓';
       toast(`Invite sent to ${firstName(b)}`);
-    } catch (err) { toast(err.message, true); }
+    } catch (err) { row.disabled = false; toast(err.message, true); }
   });
   d.showModal();
 }
@@ -179,8 +184,8 @@ function filteredBuilders() {
     if (f.savedOnly && !builderState.saved.has(b.id)) return false;
     if (f.country && b.country !== f.country) return false;
     if (f.city && b.city !== f.city) return false;
-    if (f.skill && !b.skills.includes(f.skill)) return false;
-    if (f.interest && !b.interests.includes(f.interest)) return false;
+    if (f.skill && !lowerSet(b.skills).has(f.skill.toLowerCase())) return false;
+    if (f.interest && !lowerSet(b.interests).has(f.interest.toLowerCase())) return false;
     if (f.title && b.title !== f.title) return false;
     if (f.experience && b.experience !== f.experience) return false;
     if (f.collab && b.collab !== f.collab) return false;
@@ -201,7 +206,7 @@ function builderSelect(key, label, options) {
 }
 
 function builderFilterPanel() {
-  const uniq = (xs) => [...new Set(xs.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const uniq = (xs) => [...new Map(xs.filter(Boolean).map((x) => [x.toLowerCase(), x])).values()].sort((a, b) => a.localeCompare(b));
   const cities = uniq(builderCache.filter((b) => !builderFilters.country || b.country === builderFilters.country).map((b) => b.city));
   return `<h3>⚙ Make it your kind of people</h3>
     ${builderSelect('country', 'Country', uniq(builderCache.map((b) => b.country)))}
