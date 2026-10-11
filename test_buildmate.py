@@ -31,6 +31,12 @@ class BuildmateTest(unittest.TestCase):
         self.assertEqual(payload["messages"][-1], {"role": "user", "content": "Find React people in NYC"})
         self.assertEqual((result["context"]["count"], result["context"]["anySkill"]), (10, False))
         self.assertEqual(result["provider"], "openrouter")
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-secret"}), patch.object(ai, "urlopen", return_value=io.BytesIO(encoded)) as upstream:
+            ai.interpret("Find React people in NYC", {"kind": "teams", "interest": "Climate tech"},
+                         [{"role": "user", "text": "Show climate teams"}], {})
+        payload = json.loads(upstream.call_args.args[0].data)
+        self.assertEqual(len(payload["messages"]), 2)
+        self.assertIn('"previous_filters": null', payload["messages"][0]["content"])
 
     def test_provider_errors_do_not_leak_credentials(self):
         error = HTTPError("https://openrouter.ai", 401, "secret upstream text", {}, io.BytesIO(b"secret"))

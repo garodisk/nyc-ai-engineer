@@ -210,7 +210,9 @@ function bmPaint() {
       ${m.reply ? `${m.reply.context.kind !== 'overview' ? `<div class="chat-filters">${m.reply.filters.map((f) => `<span>${esc(f)}</span>`).join('')}</div>` : ''}
         ${m.reply.results.map(bmResultCard).join('')}
         <div class="chat-followups">${m.reply.suggestions.map((s) => `<button type="button" data-bm-say="${esc(s)}">${esc(s)} ↗</button>`).join('')}</div>` : ''}
-      ${m.id === 'intro' ? `<div class="chat-starters">${BM_STARTERS.map((s) => `<button type="button" data-bm-say="${esc(s)}">💬 ${esc(s)}</button>`).join('')}</div>` : ''}</div>`).join('');
+      ${m.id === 'intro' ? `<div class="chat-starters">${BM_STARTERS.map((s) => `<button type="button" data-bm-say="${esc(s)}">💬 ${esc(s)}</button>`).join('')}</div>` : ''}</div>`).join('')
+    + (bm.busy ? `<div class="chat-message assistant chat-working" role="status"><span class="chat-spinner" aria-hidden="true"></span><div><strong>Buildmate is thinking…</strong><small>Gemini is finding the right search for you.</small></div></div>` : '');
+  box.setAttribute('aria-busy', String(bm.busy));
   box.scrollTop = box.scrollHeight;
   const d = bm.data;
   document.getElementById('bm-source').innerHTML = d ? `<i class="dot"></i>${d.builders.length} builders · ${d.teams.length} open teams · ${d.events.length} events <span>${bm.busy ? 'THINKING…' : bm.provider === 'openrouter' ? 'OPENROUTER AI' : bm.provider === 'keyword' ? 'KEYWORD FALLBACK' : 'LIVE DATA'}</span>` : '<i class="dot"></i>Loading…';
@@ -222,6 +224,10 @@ async function bmSend(prompt) {
   bm.busy = true;
   const send = document.querySelector('#bm-form button[type="submit"]');
   if (send) send.disabled = true;
+  const history = bm.messages.filter((m) => m.id !== 'intro').slice(-6).map((m) => ({ role: m.role, text: m.text }));
+  bm.messages = [...bm.messages, { id: `u${Date.now()}`, role: 'user', text }].slice(-30);
+  const input = document.getElementById('bm-input');
+  if (input) input.value = '';
   bmPaint();
   try {
     bm.data = await bmLoadData();  // always search the latest data
@@ -229,19 +235,20 @@ async function bmSend(prompt) {
   let ai;
   try {
     ai = await api('/buildmate', { prompt: text, context: bm.context,
-      history: bm.messages.filter((m) => m.id !== 'intro').slice(-6).map((m) => ({ role: m.role, text: m.text })) });
+      history });
   } catch (e) { ai = { provider: 'keyword', message: 'AI is temporarily unavailable. Using keyword search.' }; }
   bm.provider = ai.provider;
   const reply = bmAnswer(text, bm.data, bm.context, ai.provider === 'openrouter' ? ai.context : null);
   reply.text = `${ai.message ? `${ai.message}\n\n` : ''}${reply.text}`;
   reply.provider = ai.provider;
-  bm.messages = [...bm.messages, { id: `u${Date.now()}`, role: 'user', text }, { id: `a${Date.now()}`, role: 'assistant', text: reply.text, reply }].slice(-30);
+  bm.messages = [...bm.messages, { id: `a${Date.now()}`, role: 'assistant', text: reply.text, reply }].slice(-30);
   bm.context = reply.context;
   bmPersist();
-  const input = document.getElementById('bm-input');
-  if (input) input.value = '';
   bmPaint();
-  } catch (e) { toast(e.message, true); }
+  } catch (e) {
+    bm.messages.push({ id: `e${Date.now()}`, role: 'assistant', text: 'I couldn’t load the live data. Please try again.' });
+    bmPersist(); toast(e.message, true);
+  }
   finally { bm.busy = false; if (send) send.disabled = false; bmPaint(); }
 }
 

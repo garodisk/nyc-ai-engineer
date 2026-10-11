@@ -696,3 +696,9 @@ a.ritual-hero.live { border: 1px solid #b9e6d4; background: linear-gradient(120d
 .li-link:hover { text-decoration: none; filter: brightness(1.1); }
 .demo-row { display: flex; align-items: center; gap: 14px; padding: 14px 18px; }
 .demo-row .who { flex: 1; min-width: 0; }
+.chat-working { display: flex; align-items: center; gap: 12px; min-height: 70px; }
+.chat-working strong { display: block; color: #5141c9; font-size: 13px; }
+.chat-working small { display: block; margin-top: 5px; color: var(--muted); font-size: 11px; }
+.chat-spinner { width: 22px; height: 22px; flex: 0 0 22px; border: 3px solid #e1dcff; border-top-color: #6750eb; border-right-color: #3c83ff; border-radius: 50%; animation: buildmate-spin .8s linear infinite; }
+@keyframes buildmate-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .chat-spinner { animation: none; } }
